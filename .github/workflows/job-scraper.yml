@@ -1,0 +1,66 @@
+name: Job Scraper
+
+on:
+  schedule:
+    # Run every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:  # Allows manual triggering
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+        
+    - name: Install Poetry
+      run: |
+        curl -sSL https://install.python-poetry.org | python3 -
+        
+    - name: Install dependencies
+      run: |
+        cd server
+        poetry install
+        
+    - name: Run job scraper
+      id: scraper
+      run: |
+        cd server
+        poetry run python -c "from app import perform_task; perform_task(None)"
+        
+    - name: Report status
+      if: always()
+      run: |
+        if [ ${{ job.status }} == 'success' ]; then
+          echo "Job scraper completed successfully"
+        else
+          echo "Job scraper failed"
+        fi
+        
+    - name: Notify on failure
+      if: failure()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const { repo, owner } = context.repo;
+          const run_id = context.runId;
+          const run_url = `https://github.com/${owner}/${repo}/actions/runs/${run_id}`;
+          const message = `❌ Job scraper failed!\nSee details: ${run_url}`;
+          
+          await github.rest.issues.create({
+            owner,
+            repo,
+            title: '🚨 Job Scraper Failed',
+            body: message,
+            labels: ['bug', 'automation']
+          }); 
