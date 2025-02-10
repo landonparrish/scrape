@@ -1,6 +1,7 @@
 from bs4 import BeautifulSoup
 import requests
 from utils.proxy import get_free_proxies
+from utils.text_processor import TextProcessor
 from enum import Enum
 import yagooglesearch
 import re
@@ -94,9 +95,69 @@ def get_lever_job_details(link: str) -> dict:
     location_elem = soup.find("div", {"class": "location"}) or soup.find("div", {"class": "workplaceTypes"})
     location = location_elem.text.strip() if location_elem else ""
 
-    # Description
-    description_elem = soup.find("div", {"class": "content"}) or soup.find("div", {"class": "description"})
-    description = description_elem.decode_contents() if description_elem else ""
+    # Enhanced section detection
+    requirements = []
+    qualifications = []
+    benefits = []
+    description_parts = []
+
+    # Process each section
+    for section in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5']):
+        section_title = section.get_text().strip()
+        section_type = TextProcessor.identify_section(section_title)
+        
+        # Get the content following this section header
+        content = []
+        current = section.find_next()
+        while current and current.name not in ['h1', 'h2', 'h3', 'h4', 'h5']:
+            if current.name in ['p', 'li', 'ul', 'div']:
+                content.append(current.decode_contents())
+            current = current.find_next()
+        
+        # Clean the content
+        cleaned_content = TextProcessor.clean_html('\n'.join(content))
+        
+        # Sort into appropriate category
+        if section_type == 'requirements':
+            requirements.extend(TextProcessor.extract_bullet_points(cleaned_content))
+        elif section_type == 'benefits':
+            benefits.extend(TextProcessor.extract_bullet_points(cleaned_content))
+        else:
+            description_parts.append(cleaned_content)
+
+    # If no specific sections were found, try to extract from the main content
+    if not any([requirements, qualifications, benefits]):
+        main_content = soup.find("div", {"class": "content"}) or soup.find("div", {"class": "description"})
+        if main_content:
+            description = main_content.decode_contents()
+            # Try to identify sections within the main content
+            sections = main_content.find_all(['h1', 'h2', 'h3', 'h4', 'h5'])
+            if sections:
+                current_section = 'description'
+                current_content = []
+                
+                for elem in main_content.children:
+                    if elem.name in ['h1', 'h2', 'h3', 'h4', 'h5']:
+                        # Process previous section
+                        if current_content:
+                            cleaned = TextProcessor.clean_html('\n'.join(map(str, current_content)))
+                            if current_section == 'requirements':
+                                requirements.extend(TextProcessor.extract_bullet_points(cleaned))
+                            elif current_section == 'benefits':
+                                benefits.extend(TextProcessor.extract_bullet_points(cleaned))
+                            else:
+                                description_parts.append(cleaned)
+                        
+                        # Start new section
+                        current_section = TextProcessor.identify_section(elem.get_text())
+                        current_content = []
+                    else:
+                        current_content.append(str(elem))
+            else:
+                description_parts.append(TextProcessor.clean_html(description))
+
+    # Combine description parts
+    description = '\n\n'.join(description_parts)
 
     # Employment Type
     employment_type = "full-time"  # Default
@@ -128,40 +189,6 @@ def get_lever_job_details(link: str) -> dict:
             work_types.append("hybrid")
         if any(x in location.lower() for x in ["on-site", "onsite", "in office"]) and "on-site" not in work_types:
             work_types.append("on-site")
-
-    # Requirements and Qualifications
-    requirements = []
-    qualifications = []
-    for section in soup.find_all(["h3", "h4"]):
-        if any(keyword in section.text.lower() for keyword in ["requirements", "qualifications", "what you'll need"]):
-            items = []
-            current = section.find_next()
-            while current and current.name in ["p", "li", "ul"]:
-                if current.name == "li":
-                    items.append(current.text.strip())
-                elif current.name == "ul":
-                    for li in current.find_all("li"):
-                        items.append(li.text.strip())
-                current = current.find_next()
-            if "requirements" in section.text.lower():
-                requirements.extend(items)
-            else:
-                qualifications.extend(items)
-
-    # Benefits
-    benefits = []
-    for section in soup.find_all(["h3", "h4"]):
-        if any(keyword in section.text.lower() for keyword in ["benefits", "perks", "what we offer"]):
-            items = []
-            current = section.find_next()
-            while current and current.name in ["p", "li", "ul"]:
-                if current.name == "li":
-                    items.append(current.text.strip())
-                elif current.name == "ul":
-                    for li in current.find_all("li"):
-                        items.append(li.text.strip())
-                current = current.find_next()
-            benefits.extend(items)
 
     # Salary
     salary = None
@@ -225,7 +252,8 @@ def get_lever_job_details(link: str) -> dict:
             posted_date = meta.get("content")
             break
 
-    return {
+    # Create initial job details
+    job_details = {
         "title": position,
         "company": company_name,
         "location": location,
@@ -250,6 +278,8 @@ def get_lever_job_details(link: str) -> dict:
         "scraped_at": datetime.now().isoformat(),
         "status": "active"
     }
+
+    return TextProcessor.process_job_details(job_details)
 
 
 def get_greenhouse_job_details(link: str) -> dict:
@@ -278,9 +308,69 @@ def get_greenhouse_job_details(link: str) -> dict:
     location_elem = soup.find("div", {"class": "location"})
     location = location_elem.text.strip() if location_elem else ""
 
-    # Description
-    description_elem = soup.find("div", {"id": "content"})
-    description = description_elem.decode_contents() if description_elem else ""
+    # Enhanced section detection
+    requirements = []
+    qualifications = []
+    benefits = []
+    description_parts = []
+
+    # Process each section
+    for section in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5']):
+        section_title = section.get_text().strip()
+        section_type = TextProcessor.identify_section(section_title)
+        
+        # Get the content following this section header
+        content = []
+        current = section.find_next()
+        while current and current.name not in ['h1', 'h2', 'h3', 'h4', 'h5']:
+            if current.name in ['p', 'li', 'ul', 'div']:
+                content.append(current.decode_contents())
+            current = current.find_next()
+        
+        # Clean the content
+        cleaned_content = TextProcessor.clean_html('\n'.join(content))
+        
+        # Sort into appropriate category
+        if section_type == 'requirements':
+            requirements.extend(TextProcessor.extract_bullet_points(cleaned_content))
+        elif section_type == 'benefits':
+            benefits.extend(TextProcessor.extract_bullet_points(cleaned_content))
+        else:
+            description_parts.append(cleaned_content)
+
+    # If no specific sections were found, try to extract from the main content
+    if not any([requirements, qualifications, benefits]):
+        main_content = content
+        if main_content:
+            description = main_content.decode_contents()
+            # Try to identify sections within the main content
+            sections = main_content.find_all(['h1', 'h2', 'h3', 'h4', 'h5'])
+            if sections:
+                current_section = 'description'
+                current_content = []
+                
+                for elem in main_content.children:
+                    if elem.name in ['h1', 'h2', 'h3', 'h4', 'h5']:
+                        # Process previous section
+                        if current_content:
+                            cleaned = TextProcessor.clean_html('\n'.join(map(str, current_content)))
+                            if current_section == 'requirements':
+                                requirements.extend(TextProcessor.extract_bullet_points(cleaned))
+                            elif current_section == 'benefits':
+                                benefits.extend(TextProcessor.extract_bullet_points(cleaned))
+                            else:
+                                description_parts.append(cleaned)
+                        
+                        # Start new section
+                        current_section = TextProcessor.identify_section(elem.get_text())
+                        current_content = []
+                    else:
+                        current_content.append(str(elem))
+            else:
+                description_parts.append(TextProcessor.clean_html(description))
+
+    # Combine description parts
+    description = '\n\n'.join(description_parts)
 
     # Employment Type
     employment_type = "full-time"  # Default
@@ -288,10 +378,18 @@ def get_greenhouse_job_details(link: str) -> dict:
         if "type:" in p.text.lower():
             employment_type = p.text.split(":")[-1].strip().lower()
 
-    # Remote Status
+    # Remote Status and Work Types
     remote = False
-    if location and any(keyword in location.lower() for keyword in ["remote", "hybrid"]):
-        remote = True
+    work_types = []
+    if location:
+        if "remote" in location.lower():
+            remote = True
+            if "remote" not in work_types:
+                work_types.append("remote")
+        if "hybrid" in location.lower() and "hybrid" not in work_types:
+            work_types.append("hybrid")
+        if any(x in location.lower() for x in ["on-site", "onsite", "in office"]) and "on-site" not in work_types:
+            work_types.append("on-site")
 
     # Requirements and Qualifications
     requirements = []
@@ -374,15 +472,6 @@ def get_greenhouse_job_details(link: str) -> dict:
             experience_level = level
             break
 
-    # Work Types (e.g., on-site, hybrid, remote)
-    work_types = []
-    if "remote" in location.lower() or "remote" in description.lower():
-        work_types.append("remote")
-    if "hybrid" in location.lower() or "hybrid" in description.lower():
-        work_types.append("hybrid")
-    if "on-site" in location.lower() or "on site" in description.lower() or "onsite" in description.lower():
-        work_types.append("on-site")
-
     # Posted Date and Expiration
     posted_date = datetime.now().isoformat()  # Default to now if not found
     expires_at = (datetime.now() + timedelta(days=30)).isoformat()  # Default to 30 days from now
@@ -393,7 +482,8 @@ def get_greenhouse_job_details(link: str) -> dict:
             posted_date = meta.get("content")
             break
 
-    return {
+    # Create initial job details
+    job_details = {
         "title": position,
         "company": company_name,
         "location": location,
@@ -419,6 +509,8 @@ def get_greenhouse_job_details(link: str) -> dict:
         "status": "active"
     }
 
+    return TextProcessor.process_job_details(job_details)
+
 
 def get_ashby_job_details(link: str) -> dict:
     response = requests.get(link)
@@ -443,11 +535,69 @@ def get_ashby_job_details(link: str) -> dict:
     if location_elem:
         location = location_elem.text.strip()
 
-    # Description
-    description = ""
-    description_elem = soup.find("div", {"data-testid": "job-description"})
-    if description_elem:
-        description = description_elem.decode_contents()
+    # Enhanced section detection
+    requirements = []
+    qualifications = []
+    benefits = []
+    description_parts = []
+
+    # Process each section
+    for section in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5']):
+        section_title = section.get_text().strip()
+        section_type = TextProcessor.identify_section(section_title)
+        
+        # Get the content following this section header
+        content = []
+        current = section.find_next()
+        while current and current.name not in ['h1', 'h2', 'h3', 'h4', 'h5']:
+            if current.name in ['p', 'li', 'ul', 'div']:
+                content.append(current.decode_contents())
+            current = current.find_next()
+        
+        # Clean the content
+        cleaned_content = TextProcessor.clean_html('\n'.join(content))
+        
+        # Sort into appropriate category
+        if section_type == 'requirements':
+            requirements.extend(TextProcessor.extract_bullet_points(cleaned_content))
+        elif section_type == 'benefits':
+            benefits.extend(TextProcessor.extract_bullet_points(cleaned_content))
+        else:
+            description_parts.append(cleaned_content)
+
+    # If no specific sections were found, try to extract from the main content
+    if not any([requirements, qualifications, benefits]):
+        main_content = soup.find("div", {"data-testid": "job-description"})
+        if main_content:
+            description = main_content.decode_contents()
+            # Try to identify sections within the main content
+            sections = main_content.find_all(['h1', 'h2', 'h3', 'h4', 'h5'])
+            if sections:
+                current_section = 'description'
+                current_content = []
+                
+                for elem in main_content.children:
+                    if elem.name in ['h1', 'h2', 'h3', 'h4', 'h5']:
+                        # Process previous section
+                        if current_content:
+                            cleaned = TextProcessor.clean_html('\n'.join(map(str, current_content)))
+                            if current_section == 'requirements':
+                                requirements.extend(TextProcessor.extract_bullet_points(cleaned))
+                            elif current_section == 'benefits':
+                                benefits.extend(TextProcessor.extract_bullet_points(cleaned))
+                            else:
+                                description_parts.append(cleaned)
+                        
+                        # Start new section
+                        current_section = TextProcessor.identify_section(elem.get_text())
+                        current_content = []
+                    else:
+                        current_content.append(str(elem))
+            else:
+                description_parts.append(TextProcessor.clean_html(description))
+
+    # Combine description parts
+    description = '\n\n'.join(description_parts)
 
     # Employment Type
     employment_type = "full-time"  # Default
@@ -574,7 +724,8 @@ def get_ashby_job_details(link: str) -> dict:
         except:
             pass
 
-    return {
+    # Create initial job details
+    job_details = {
         "title": position,
         "company": company_name,
         "location": location,
@@ -600,6 +751,8 @@ def get_ashby_job_details(link: str) -> dict:
         "status": "active"
     }
 
+    return TextProcessor.process_job_details(job_details)
+
 
 def handle_job_insert(supabase: any, job_urls: list[str], job_site: JobSite):
     for link in job_urls:
@@ -624,14 +777,14 @@ def handle_job_insert(supabase: any, job_urls: list[str], job_site: JobSite):
                 "salary": job_details["salary"],
                 "remote": job_details["remote"],
                 "work_types": "{" + ",".join(job_details["work_types"]) + "}" if job_details["work_types"] else "{remote}" if job_details["remote"] else None,
-                "employment_type": None,  # Set to null as it has constraints
-                "experience_level": None,  # Set to null to avoid constraint issues
+                "employment_type": job_details["employment_type"],
+                "experience_level": job_details["experience_level"],
                 "requirements": "{" + ",".join(job_details["requirements"]) + "}" if job_details["requirements"] else None,
                 "qualifications": "{" + ",".join(f'"{q}"' for q in job_details["qualifications"]) + "}" if job_details["qualifications"] else None,
                 "benefits": "{" + ",".join(f'"{b}"' for b in job_details["benefits"]) + "}" if job_details["benefits"] else None,
                 "application_url": job_details["application_url"],
                 "company_logo": job_details["company_logo"],
-                "source": None,  # Set to null to avoid constraint issues
+                "source": job_details["source"],
                 "posted_date": job_details["posted_date"],
                 "expires_at": job_details["expires_at"],
                 "scraped_at": datetime.now().isoformat(),
