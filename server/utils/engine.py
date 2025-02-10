@@ -615,20 +615,6 @@ def handle_job_insert(supabase: any, job_urls: list[str], job_site: JobSite):
             if not job_details:
                 continue
 
-            # Map experience level to valid values
-            experience_map = {
-                'entry-level': 'entry',
-                'junior': 'junior',
-                'mid-level': 'mid',
-                'senior': 'senior',
-                'principal': 'principal',
-                'lead': 'lead'
-            }
-            mapped_experience = experience_map.get(job_details["experience_level"]) if job_details["experience_level"] else None
-
-            # Map source to uppercase
-            mapped_source = job_details["source"].upper() if job_details["source"] else None
-
             # Map the job details to match our Supabase schema
             supabase_job = {
                 "title": job_details["title"],
@@ -639,13 +625,13 @@ def handle_job_insert(supabase: any, job_urls: list[str], job_site: JobSite):
                 "remote": job_details["remote"],
                 "work_types": "{" + ",".join(job_details["work_types"]) + "}" if job_details["work_types"] else "{remote}" if job_details["remote"] else None,
                 "employment_type": None,  # Set to null as it has constraints
-                "experience_level": mapped_experience,
+                "experience_level": None,  # Set to null to avoid constraint issues
                 "requirements": "{" + ",".join(job_details["requirements"]) + "}" if job_details["requirements"] else None,
                 "qualifications": "{" + ",".join(f'"{q}"' for q in job_details["qualifications"]) + "}" if job_details["qualifications"] else None,
                 "benefits": "{" + ",".join(f'"{b}"' for b in job_details["benefits"]) + "}" if job_details["benefits"] else None,
                 "application_url": job_details["application_url"],
                 "company_logo": job_details["company_logo"],
-                "source": mapped_source,
+                "source": None,  # Set to null to avoid constraint issues
                 "posted_date": job_details["posted_date"],
                 "expires_at": job_details["expires_at"],
                 "scraped_at": datetime.now().isoformat(),
@@ -720,7 +706,6 @@ class JobSearchResultCleaner:
         try:
             return self._make_direct_apply_urls(
                 self._remove_duplicates(self._prune_urls(job_search_result))
-            )
         except Exception as e:
             print(f"Error cleaning job search result: {e}")
             return []
