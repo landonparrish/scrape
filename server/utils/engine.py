@@ -41,35 +41,65 @@ def crawl_wellfound_jobs(location_url: str) -> list[str]:
         try:
             # Add page parameter if not first page
             url = location_url if page == 1 else f"{location_url}?page={page}"
-            response = requests.get(url)
+            logging.info(f"Crawling Wellfound page {page}: {url}")
+            
+            response = requests.get(url, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            })
             soup = BeautifulSoup(response.content, "html.parser")
             
-            # Find job links
-            job_links = soup.find_all("a", href=lambda x: x and "/jobs/" in x)
+            # Find job links - try multiple selectors
+            job_links = []
+            # Method 1: Direct job links
+            job_links.extend(soup.find_all("a", href=lambda x: x and "/jobs/" in x))
+            # Method 2: Job cards
+            job_links.extend(soup.find_all("a", class_=lambda x: x and "job-card" in str(x).lower()))
+            # Method 3: Role links
+            job_links.extend(soup.find_all("a", href=lambda x: x and "/role/" in x))
+            
             if not job_links:
+                logging.info(f"No job links found on page {page}")
                 break
                 
             # Extract and normalize URLs
             for link in job_links:
                 href = link.get("href")
                 if href:
+                    # Clean and normalize URL
                     if not href.startswith("http"):
-                        href = "https://wellfound.com" + href
-                    job_urls.append(href)
+                        if href.startswith("//"):
+                            href = "https:" + href
+                        else:
+                            href = "https://wellfound.com" + href
+                    
+                    # Ensure it's a job URL
+                    if "/jobs/" in href or "/role/" in href:
+                        job_urls.append(href)
             
             # Check if there's a next page
-            next_button = soup.find("a", string=lambda x: x and "Next" in x) or \
-                         soup.find("button", string=lambda x: x and "Next" in x)
-            if not next_button or "disabled" in next_button.get("class", []):
+            next_button = (
+                soup.find("a", string=lambda x: x and "Next" in x) or
+                soup.find("button", string=lambda x: x and "Next" in x) or
+                soup.find("a", class_=lambda x: x and "next" in str(x).lower())
+            )
+            
+            if not next_button or "disabled" in str(next_button.get("class", [])):
+                logging.info(f"No more pages found after page {page}")
                 break
                 
             page += 1
+            if page > 20:  # Safety limit
+                logging.info("Reached maximum page limit")
+                break
             
         except Exception as e:
             logging.error(f"Error crawling Wellfound page {page}: {str(e)}")
             break
     
-    return list(set(job_urls))  # Remove duplicates
+    # Clean and deduplicate URLs
+    cleaned_urls = list(set(job_urls))
+    logging.info(f"Found {len(cleaned_urls)} unique Wellfound job URLs")
+    return cleaned_urls
 
 
 def find_jobs(
@@ -1130,7 +1160,7 @@ regex = {
     JobSite.LEVER: r"https://jobs.lever.co/[^/]+/[^/]+(?:/apply)?",
     JobSite.GREENHOUSE: r"https?://(?:job-boards\.|boards\.)?greenhouse\.io/[^/]+/jobs/\d+(?:[#?][^/]*)?",
     JobSite.ASHBY: r"https?://jobs\.ashbyhq\.com/[^/]+/[a-f0-9-]+(?:/application)?",
-    JobSite.WELLFOUND: r"https?://(?:www\.)?wellfound\.com/jobs?/[^/]+/[^/]+(?:/apply)?",
+    JobSite.WELLFOUND: r"https?://(?:www\.)?wellfound\.com/(?:jobs?|role)/[^/]+(?:/[^/]+)?(?:/apply)?",
     JobSite.ANGELLIST: "TODO",
     JobSite.WORKABLE: "TODO",
     JobSite.INDEED: "TODO",
@@ -1221,6 +1251,7 @@ class JobSearchResultCleaner:
         try:
             return self._make_direct_apply_urls(
                 self._remove_duplicates(self._prune_urls(job_search_result))
+            )
         except Exception as e:
             print(f"Error cleaning job search result: {e}")
             return []
