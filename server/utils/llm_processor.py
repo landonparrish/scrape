@@ -4,125 +4,95 @@ import logging
 from typing import Dict, List, Optional
 import requests
 from datetime import datetime
-
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-7b03fa27df1a43e897933f676374933b")
+from utils.text_processor import TextProcessor
 
 class LLMProcessor:
     def __init__(self):
-        self.api_key = DEEPSEEK_API_KEY
+        self.api_key = os.getenv('DEEPSEEK_API_KEY')
+        if not self.api_key:
+            raise ValueError("DEEPSEEK_API_KEY environment variable not set")
         self.api_url = "https://api.deepseek.com/v1/chat/completions"
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
+        self.model = "deepseek-chat"
+        self.text_processor = TextProcessor()
 
-    def _call_llm(self, messages: List[Dict]) -> Optional[str]:
-        """Make an API call to Deepseek."""
+    def _call_api(self, messages: List[Dict[str, str]], temperature: float = 0.3) -> Optional[str]:
+        """Call DeepSeek API with retry logic."""
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
+        
+        data = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature
+        }
+        
         try:
-            response = requests.post(
-                self.api_url,
-                headers=self.headers,
-                json={
-                    "model": "deepseek-chat",
-                    "messages": messages,
-                    "temperature": 0.1  # Low temperature for consistent outputs
-                }
-            )
+            response = requests.post(self.api_url, headers=headers, json=data)
             response.raise_for_status()
-            return response.json()["choices"][0]["message"]["content"]
+            return response.json()['choices'][0]['message']['content']
         except Exception as e:
-            logging.error(f"LLM API call failed: {str(e)}")
+            logging.error(f"API call failed: {str(e)}")
             return None
 
-    def process_job_details(self, raw_job_data: Dict) -> Dict:
-        """Process job details using LLM to properly categorize and structure information."""
+    def process_job_details(self, job_details: Dict) -> Optional[Dict]:
+        """Process job details using DeepSeek API."""
+        # Note: We assume job_details['description'] is already cleaned by TextProcessor
+        # in the scraping phase, so no need to clean HTML here
+        prompt = self._create_job_enhancement_prompt(job_details)
         
-        # Construct the prompt
-        system_prompt = """You are an expert job data processor. Your task is to analyze job posting data and structure it into clear, well-defined categories. Focus on accuracy and proper categorization of information.
-
-For each field, follow these specific guidelines:
-- title: Clean, professional job title in title case
-- company: Company name in proper case
-- location: Standardized location format (City, State, Country) and/or Remote status
-- description: Clear, concise summary of the role
-- requirements: List of MUST-HAVE skills and qualifications
-- qualifications: List of NICE-TO-HAVE skills and preferred qualifications
-- benefits: List of company benefits and perks
-- employment_type: full-time, part-time, contract, internship
-- experience_level: entry-level, junior, mid-level, senior, principal
-- work_types: List containing any of: remote, hybrid, on-site
-- salary_min: Minimum salary as integer (if provided)
-- salary_max: Maximum salary as integer (if provided)
-- salary_type: hourly, yearly, or null
-- salary_currency: USD, EUR, etc. or null
-
-Return the processed data in valid JSON format."""
-
-        # Convert raw job data to a string representation
-        job_data_str = json.dumps(raw_job_data, indent=2)
-
-        user_prompt = f"""Please process this job posting data and return a properly structured JSON object:
-
-{job_data_str}
-
-Focus on:
-1. Correctly categorizing requirements vs qualifications
-2. Standardizing location format
-3. Extracting accurate salary information
-4. Determining correct experience level
-5. Identifying work type (remote/hybrid/onsite)
-6. Cleaning and standardizing all fields
-
-Return only the JSON object with no additional text."""
-
         messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
+            {"role": "system", "content": "You are an expert job analyst. Your task is to analyze job postings and extract key information in a structured format."},
+            {"role": "user", "content": prompt}
         ]
-
+        
         try:
-            # Get LLM response
-            llm_response = self._call_llm(messages)
-            if not llm_response:
-                return raw_job_data
-
-            # Parse the JSON response
-            processed_data = json.loads(llm_response)
-
-            # Ensure all required fields are present
-            required_fields = {
-                "title", "company", "location", "description", 
-                "requirements", "qualifications", "benefits",
-                "employment_type", "experience_level", "work_types"
-            }
-            
-            for field in required_fields:
-                if field not in processed_data:
-                    processed_data[field] = raw_job_data.get(field)
-
-            # Ensure arrays are properly formatted
-            list_fields = ["requirements", "qualifications", "benefits", "work_types"]
-            for field in list_fields:
-                if not isinstance(processed_data.get(field), list):
-                    processed_data[field] = []
-
-            # Add metadata fields
-            processed_data.update({
-                "source": raw_job_data.get("source"),
-                "application_url": raw_job_data.get("application_url"),
-                "company_logo": raw_job_data.get("company_logo"),
-                "posted_date": raw_job_data.get("posted_date", datetime.now().isoformat()),
-                "expires_at": raw_job_data.get("expires_at"),
-                "scraped_at": datetime.now().isoformat(),
-                "status": "active",
-                "job_hash": raw_job_data.get("job_hash")
-            })
-
-            return processed_data
-
+            response = self._call_api(messages)
+            if response:
+                return self._parse_llm_response(response)
         except Exception as e:
-            logging.error(f"Error processing job details with LLM: {str(e)}")
-            return raw_job_data
+            logging.error(f"Failed to process job details: {str(e)}")
+        
+        return None
+
+    def _create_job_enhancement_prompt(self, job_details: Dict) -> str:
+        """Create a prompt for job enhancement."""
+        return f"""Please analyze this job posting and provide a structured response with the following information:
+
+Job Details:
+Title: {job_details.get('title', '')}
+Company: {job_details.get('company', '')}
+Description: {job_details.get('description', '')}
+Location: {job_details.get('location', '')}
+Requirements: {job_details.get('requirements', [])}
+Benefits: {job_details.get('benefits', [])}
+
+Please provide a JSON response with the following fields:
+- standardized_title: A clean, standardized version of the job title
+- job_category: The general category this job falls under (e.g., Software Development, Data Science, DevOps)
+- industry: The primary industry this role is in
+- key_skills: A list of key technical and soft skills required (extracted from requirements and description)
+- education_level: The minimum required education level
+- experience_level: The experience level (entry-level, mid-level, senior, principal)
+- work_types: List of work types (remote, hybrid, on-site)
+- enhanced_description: A clear, well-structured description of the role
+- standardized_benefits: A cleaned list of benefits offered
+
+Format your response as a valid JSON object."""
+
+    def _parse_llm_response(self, response: str) -> Optional[Dict]:
+        """Parse the LLM response into a structured format."""
+        try:
+            # Find JSON content within the response
+            json_start = response.find('{')
+            json_end = response.rfind('}') + 1
+            if json_start >= 0 and json_end > json_start:
+                json_content = response[json_start:json_end]
+                return json.loads(json_content)
+        except json.JSONDecodeError as e:
+            logging.error(f"Failed to parse LLM response: {str(e)}")
+        return None
 
     def extract_experience_level(self, title: str, description: str) -> str:
         """Use LLM to determine experience level from job title and description."""
@@ -140,7 +110,7 @@ Return only the experience level, nothing else."""
             {"role": "user", "content": prompt}
         ]
 
-        response = self._call_llm(messages)
+        response = self._call_api(messages)
         if response:
             response = response.strip().lower()
             valid_levels = {"entry-level", "junior", "mid-level", "senior", "principal"}
@@ -167,7 +137,7 @@ Return the cleaned requirements as a JSON array with no additional text."""
             {"role": "user", "content": prompt}
         ]
 
-        response = self._call_llm(messages)
+        response = self._call_api(messages)
         if response:
             try:
                 cleaned = json.loads(response)
