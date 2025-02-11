@@ -1107,6 +1107,7 @@ class JobSearchResultCleaner:
         try:
             return self._make_direct_apply_urls(
                 self._remove_duplicates(self._prune_urls(job_search_result))
+            )
         except Exception as e:
             print(f"Error cleaning job search result: {e}")
             return []
