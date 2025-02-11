@@ -44,8 +44,8 @@ def perform_task(body):
     job_urls_by_board = find_jobs(
         COMPREHENSIVE_JOB_QUERY,
         [JobSite.LEVER, JobSite.GREENHOUSE, JobSite.ASHBY],
-        TBS.PAST_TWELVE_HOURS,
-        200,
+        TBS.PAST_WEEK,
+        1000,
     )
     try:
         supabase_client = SupabaseClient()

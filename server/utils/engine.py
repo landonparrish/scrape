@@ -11,6 +11,7 @@ import hashlib
 import time
 from typing import Optional
 import random
+import os
 
 
 class JobSite(Enum):
@@ -151,6 +152,14 @@ def find_jobs(
                 
                 for time_range in time_ranges:
                     try:
+                        # Set proxy environment variables if proxy is provided
+                        original_http_proxy = os.environ.get('HTTP_PROXY')
+                        original_https_proxy = os.environ.get('HTTPS_PROXY')
+                        
+                        if proxy:
+                            os.environ['HTTP_PROXY'] = proxy
+                            os.environ['HTTPS_PROXY'] = proxy
+                        
                         client_args = {
                             "query": search_query,
                             "tbs": time_range.value,
@@ -158,19 +167,36 @@ def find_jobs(
                             "verbosity": 0
                         }
                         
-                        # Only add proxy if one is provided
-                        if proxy:
-                            client_args["http_proxy"] = proxy
-                            client_args["https_proxy"] = proxy
-                            
                         client = yagooglesearch.SearchClient(**client_args)
                         client.assign_random_user_agent()
                         results = client.search()
                         all_results.extend(results)
+                        
+                        # Restore original proxy settings
+                        if proxy:
+                            if original_http_proxy:
+                                os.environ['HTTP_PROXY'] = original_http_proxy
+                            else:
+                                del os.environ['HTTP_PROXY']
+                            if original_https_proxy:
+                                os.environ['HTTPS_PROXY'] = original_https_proxy
+                            else:
+                                del os.environ['HTTPS_PROXY']
+                        
                         # Add a small delay between searches
                         time.sleep(random.uniform(2, 5))
                     except Exception as e:
                         logging.error(f"Error searching with time range {time_range}: {str(e)}")
+                        # Restore proxy settings even if there's an error
+                        if proxy:
+                            if original_http_proxy:
+                                os.environ['HTTP_PROXY'] = original_http_proxy
+                            else:
+                                del os.environ['HTTP_PROXY']
+                            if original_https_proxy:
+                                os.environ['HTTPS_PROXY'] = original_https_proxy
+                            else:
+                                del os.environ['HTTPS_PROXY']
                         continue
                 
                 result = list(set(all_results))  # Remove duplicates
