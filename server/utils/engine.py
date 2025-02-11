@@ -1027,7 +1027,7 @@ def generate_job_hash(job_details: dict) -> str:
 
 
 def get_job_page_with_retry(url: str, max_retries: int = 3) -> Optional[BeautifulSoup]:
-    """Fetch and parse a job page with retry logic."""
+    """Fetch and parse a job page with retry logic and proxy rotation."""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -1035,36 +1035,72 @@ def get_job_page_with_retry(url: str, max_retries: int = 3) -> Optional[Beautifu
         'Accept-Encoding': 'gzip, deflate, br',
         'DNT': '1',
         'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1',
-        'Cache-Control': 'max-age=0'
+        'Upgrade-Insecure-Requests': '1'
     }
     
-    for attempt in range(max_retries):
-        try:
-            # Add exponential backoff between retries
-            if attempt > 0:
-                sleep_time = (2 ** attempt) + random.uniform(0, 1)
-                time.sleep(sleep_time)
-            
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            
-            # Add a small delay between requests to avoid rate limiting
-            time.sleep(random.uniform(1, 3))
-            
-            soup = BeautifulSoup(response.content, "html.parser")
-            if not soup or not soup.find("html"):
-                raise ValueError("Invalid HTML content")
-            return soup
-        except Exception as e:
+    # Get list of proxies including None (direct connection)
+    proxies = [None] + get_free_proxies()
+    
+    for proxy in proxies:
+        for attempt in range(max_retries):
+            try:
+                # Add exponential backoff between retries
+                if attempt > 0:
+                    sleep_time = (2 ** attempt) + random.uniform(0, 1)
+                    time.sleep(sleep_time)
+                
+                # Configure proxy if one is being used
+                request_proxies = None
+                if proxy:
+                    request_proxies = {
+                        'http': proxy,
+                        'https': proxy
+                    }
+                    logging.info(f"Trying proxy {proxy} for {url}")
+                
+                response = requests.get(url, headers=headers, proxies=request_proxies, timeout=10)
+                response.raise_for_status()
+                
+                # Try multiple encodings if default fails
+                content = None
+                encodings = ['utf-8', 'iso-8859-1', 'cp1252', 'latin1']
+                
+                for encoding in encodings:
+                    try:
+                        content = response.content.decode(encoding)
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                
+                if not content:
+                    content = response.text  # Fallback to requests' auto-detection
+                
+                # Parse with more lenient settings
+                soup = BeautifulSoup(content, "html.parser", from_encoding='utf-8')
+                
+                # Verify we got actual content
+                if not soup or not soup.find("body"):
+                    raise ValueError("Invalid or empty HTML content")
+                    
+                # Add a small delay between requests
+                time.sleep(random.uniform(1, 3))
+                
+                return soup
+                
+            except requests.exceptions.RequestException as e:
+                logging.warning(f"Request failed for {url} using proxy {proxy} (attempt {attempt + 1}/{max_retries}): {str(e)}")
+            except ValueError as e:
+                logging.warning(f"Invalid content from {url} using proxy {proxy} (attempt {attempt + 1}/{max_retries}): {str(e)}")
+            except Exception as e:
+                logging.warning(f"Unexpected error fetching {url} using proxy {proxy} (attempt {attempt + 1}/{max_retries}): {str(e)}")
+                
             if attempt == max_retries - 1:
-                logging.error("Failed to fetch {} after {} attempts: {}".format(url, max_retries, str(e)))
-                return None
+                logging.warning(f"Failed to fetch {url} with proxy {proxy} after {max_retries} attempts, trying next proxy")
+                break
+                
             time.sleep(1 * (attempt + 1))  # Exponential backoff
+    
+    logging.error(f"Failed to fetch {url} after trying all proxies")
     return None
 
 
