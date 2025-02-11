@@ -132,20 +132,20 @@ def find_jobs(
     # Then do Google search for remaining job sites
     remaining_sites = [site for site in job_sites if site not in job_urls_by_board]
     if remaining_sites:
-    proxies = [None] + get_free_proxies()
-    proxy_index = 0
+        proxies = [None] + get_free_proxies()
+        proxy_index = 0
 
-    success = False
-    result = []
+        success = False
+        result = []
 
         while not success and proxy_index < len(proxies):
-        try:
-            proxy = proxies[proxy_index]
-            proxy_index += 1
+            try:
+                proxy = proxies[proxy_index]
+                proxy_index += 1
 
                 search_sites = " OR ".join([f"site:{site.value}" for site in remaining_sites])
-            search_query = f"{keyword} {search_sites}"
-            print(f"Searching for {search_query} using proxy {proxy}")
+                search_query = f"{keyword} {search_sites}"
+                print(f"Searching for {search_query} using proxy {proxy}")
                 
                 # Split into multiple searches with different time ranges to get more results
                 time_ranges = [TBS.PAST_TWELVE_HOURS, TBS.PAST_DAY, TBS.PAST_WEEK] if not tbs else [tbs]
@@ -153,14 +153,14 @@ def find_jobs(
                 
                 for time_range in time_ranges:
                     try:
-            client = yagooglesearch.SearchClient(
-                search_query,
+                        client = yagooglesearch.SearchClient(
+                            search_query,
                             tbs=time_range.value,
                             max_search_result_urls_to_return=max_results // len(time_ranges),
-                proxy=proxy,
-                verbosity=0,
-            )
-            client.assign_random_user_agent()
+                            proxy=proxy,
+                            verbosity=0,
+                        )
+                        client.assign_random_user_agent()
                         results = client.search()
                         all_results.extend(results)
                     except Exception as e:
@@ -169,15 +169,15 @@ def find_jobs(
                 
                 result = list(set(all_results))  # Remove duplicates
                 success = bool(result)
-        except Exception as e:
-            print(f"Error using proxy {proxy}: ", e)
+            except Exception as e:
+                print(f"Error using proxy {proxy}: ", e)
 
         for job_site in remaining_sites:
-        job_urls_for_job_site = [
-            url for url in result if re.search(regex[job_site], url)
-        ]
-        cleaner = JobSearchResultCleaner(job_site)
-        job_urls_by_board[job_site] = cleaner.clean(job_urls_for_job_site)
+            job_urls_for_job_site = [
+                url for url in result if re.search(regex[job_site], url)
+            ]
+            cleaner = JobSearchResultCleaner(job_site)
+            job_urls_by_board[job_site] = cleaner.clean(job_urls_for_job_site)
 
     return job_urls_by_board
 
