@@ -215,11 +215,179 @@ def find_jobs(
     return job_urls_by_board
 
 
+class ProxyRotator:
+    def __init__(self):
+        self.proxies = [None]  # Start with direct connection
+        self.current_proxy_index = 0
+        self.requests_with_current_proxy = 0
+        self.max_requests_per_proxy = 25  # Rotate after this many requests
+        self.proxy_failures = {}  # Track failures per proxy
+        self.max_failures = 3  # Max failures before blacklisting a proxy
+        self.last_rotation_time = time.time()
+        self.min_rotation_interval = 60  # Minimum seconds between rotations
+        
+    def initialize(self):
+        """Initialize or refresh proxy list."""
+        new_proxies = get_free_proxies()
+        if new_proxies:
+            self.proxies = [None] + new_proxies  # Always keep direct connection as an option
+            self.proxy_failures = {proxy: 0 for proxy in self.proxies}
+    
+    def get_current_proxy(self):
+        """Get current proxy configuration."""
+        if not self.proxies or len(self.proxies) <= self.current_proxy_index:
+            self.initialize()
+            self.current_proxy_index = 0
+            
+        current_proxy = self.proxies[self.current_proxy_index]
+        if current_proxy:
+            return {
+                'http': current_proxy,
+                'https': current_proxy
+            }
+        return None
+    
+    def should_rotate(self, status_code=None):
+        """Determine if we should rotate to next proxy."""
+        # Always rotate on rate limit or forbidden
+        if status_code in [429, 403]:
+            return True
+            
+        # Rotate if we've used this proxy too much
+        if self.requests_with_current_proxy >= self.max_requests_per_proxy:
+            return True
+            
+        # Rotate if minimum time has passed
+        if time.time() - self.last_rotation_time >= self.min_rotation_interval:
+            return True
+            
+        return False
+    
+    def mark_success(self):
+        """Mark current proxy as successful."""
+        self.requests_with_current_proxy += 1
+    
+    def mark_failure(self, error=None):
+        """Mark current proxy as failed."""
+        current_proxy = self.proxies[self.current_proxy_index]
+        self.proxy_failures[current_proxy] = self.proxy_failures.get(current_proxy, 0) + 1
+        
+        # If error indicates blocking/rate limiting, force rotation
+        if isinstance(error, requests.exceptions.RequestException):
+            if any(term in str(error).lower() for term in ['timeout', 'blocked', 'forbidden', 'rate', 'too many']):
+                self.rotate_proxy()
+    
+    def rotate_proxy(self):
+        """Rotate to next available proxy."""
+        # Remove proxies that have failed too many times
+        self.proxies = [p for p in self.proxies if self.proxy_failures.get(p, 0) < self.max_failures]
+        
+        # If we're running low on proxies, get new ones
+        if len(self.proxies) < 3:
+            self.initialize()
+        
+        # Move to next proxy
+        self.current_proxy_index = (self.current_proxy_index + 1) % len(self.proxies)
+        self.requests_with_current_proxy = 0
+        self.last_rotation_time = time.time()
+        
+        current_proxy = self.proxies[self.current_proxy_index]
+        logging.info(f"Rotating to {'direct connection' if current_proxy is None else f'proxy {current_proxy}'}")
+
+# Initialize global proxy rotator
+proxy_rotator = ProxyRotator()
+
+def make_request(url: str, max_retries: int = 3) -> Optional[requests.Response]:
+    """Make an HTTP request with proxy rotation and retry logic."""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1'
+    }
+    
+    for attempt in range(max_retries):
+        try:
+            # Get current proxy configuration
+            proxies = proxy_rotator.get_current_proxy()
+            
+            # Add exponential backoff between retries
+            if attempt > 0:
+                sleep_time = (2 ** attempt) + random.uniform(0, 1)
+                time.sleep(sleep_time)
+            
+            response = requests.get(url, headers=headers, proxies=proxies, timeout=10)
+            status_code = response.status_code
+            
+            # Check if we should rotate proxy based on response
+            if proxy_rotator.should_rotate(status_code):
+                proxy_rotator.rotate_proxy()
+                if status_code in [429, 403]:  # Rate limit or forbidden
+                    continue
+            
+            response.raise_for_status()
+            proxy_rotator.mark_success()
+            
+            # Add a small delay between requests
+            time.sleep(random.uniform(1, 3))
+            
+            return response
+            
+        except Exception as e:
+            proxy_rotator.mark_failure(e)
+            logging.warning(f"Request failed for {url} (attempt {attempt + 1}/{max_retries}): {str(e)}")
+            
+            if attempt == max_retries - 1:
+                logging.error(f"Failed to fetch {url} after {max_retries} attempts")
+                return None
+    
+    return None
+
+def get_job_page_with_retry(url: str, max_retries: int = 3) -> Optional[BeautifulSoup]:
+    """Fetch and parse a job page with retry logic and proxy rotation."""
+    response = make_request(url, max_retries)
+    if not response:
+        return None
+        
+    try:
+        # Try multiple encodings if default fails
+        content = None
+        encodings = ['utf-8', 'iso-8859-1', 'cp1252', 'latin1']
+        
+        for encoding in encodings:
+            try:
+                content = response.content.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        
+        if not content:
+            content = response.text  # Fallback to requests' auto-detection
+        
+        # Parse with more lenient settings
+        soup = BeautifulSoup(content, "html.parser", from_encoding='utf-8')
+        
+        # Verify we got actual content
+        if not soup or not soup.find("body"):
+            raise ValueError("Invalid or empty HTML content")
+        
+        return soup
+        
+    except Exception as e:
+        logging.error(f"Error parsing content from {url}: {str(e)}")
+        return None
+
 def crawl_lever_jobs(base_url: str) -> list[str]:
     """Crawl Lever job board directly."""
     job_urls = []
     try:
-        response = requests.get(base_url)
+        response = make_request(base_url)
+        if not response:
+            return []
+            
         soup = BeautifulSoup(response.content, "html.parser")
         
         # Find all job links
@@ -227,36 +395,40 @@ def crawl_lever_jobs(base_url: str) -> list[str]:
             job_urls.append(link["href"])
             
     except Exception as e:
-        logging.error("Error crawling Lever jobs from {}: {}".format(base_url, str(e)))
+        logging.error(f"Error crawling Lever jobs from {base_url}: {str(e)}")
     
     return list(set(job_urls))
-
 
 def crawl_greenhouse_jobs(base_url: str) -> list[str]:
     """Crawl Greenhouse job board directly."""
     job_urls = []
     try:
-        response = requests.get(base_url)
+        response = make_request(base_url)
+        if not response:
+            return []
+            
         soup = BeautifulSoup(response.content, "html.parser")
         
         # Find all job links
         for link in soup.find_all("a", href=re.compile(r"/jobs/\d+")):
             href = link["href"]
             if not href.startswith("http"):
-                href = "https://boards.greenhouse.io{}".format(href)
+                href = f"https://boards.greenhouse.io{href}"
             job_urls.append(href)
             
     except Exception as e:
-        logging.error("Error crawling Greenhouse jobs from {}: {}".format(base_url, str(e)))
+        logging.error(f"Error crawling Greenhouse jobs from {base_url}: {str(e)}")
     
     return list(set(job_urls))
-
 
 def crawl_ashby_jobs(base_url: str) -> list[str]:
     """Crawl Ashby job board directly."""
     job_urls = []
     try:
-        response = requests.get(base_url)
+        response = make_request(base_url)
+        if not response:
+            return []
+            
         soup = BeautifulSoup(response.content, "html.parser")
         
         # Find all job links
@@ -264,14 +436,16 @@ def crawl_ashby_jobs(base_url: str) -> list[str]:
             job_urls.append(link["href"])
             
     except Exception as e:
-        logging.error("Error crawling Ashby jobs from {}: {}".format(base_url, str(e)))
+        logging.error(f"Error crawling Ashby jobs from {base_url}: {str(e)}")
     
     return list(set(job_urls))
 
-
 def get_lever_job_details(link: str) -> dict:
     try:
-        response = requests.get(link)
+        response = make_request(link)
+        if not response:
+            return None
+            
         soup = BeautifulSoup(response.content, "html.parser")
 
         # Basic job info
@@ -1024,84 +1198,6 @@ def generate_job_hash(job_details: dict) -> str:
     )
     # Create a hash of the string
     return hashlib.md5(unique_string.encode()).hexdigest()
-
-
-def get_job_page_with_retry(url: str, max_retries: int = 3) -> Optional[BeautifulSoup]:
-    """Fetch and parse a job page with retry logic and proxy rotation."""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'DNT': '1',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1'
-    }
-    
-    # Get list of proxies including None (direct connection)
-    proxies = [None] + get_free_proxies()
-    
-    for proxy in proxies:
-        for attempt in range(max_retries):
-            try:
-                # Add exponential backoff between retries
-                if attempt > 0:
-                    sleep_time = (2 ** attempt) + random.uniform(0, 1)
-                    time.sleep(sleep_time)
-                
-                # Configure proxy if one is being used
-                request_proxies = None
-                if proxy:
-                    request_proxies = {
-                        'http': proxy,
-                        'https': proxy
-                    }
-                    logging.info(f"Trying proxy {proxy} for {url}")
-                
-                response = requests.get(url, headers=headers, proxies=request_proxies, timeout=10)
-                response.raise_for_status()
-                
-                # Try multiple encodings if default fails
-                content = None
-                encodings = ['utf-8', 'iso-8859-1', 'cp1252', 'latin1']
-                
-                for encoding in encodings:
-                    try:
-                        content = response.content.decode(encoding)
-                        break
-                    except UnicodeDecodeError:
-                        continue
-                
-                if not content:
-                    content = response.text  # Fallback to requests' auto-detection
-                
-                # Parse with more lenient settings
-                soup = BeautifulSoup(content, "html.parser", from_encoding='utf-8')
-                
-                # Verify we got actual content
-                if not soup or not soup.find("body"):
-                    raise ValueError("Invalid or empty HTML content")
-                    
-                # Add a small delay between requests
-                time.sleep(random.uniform(1, 3))
-                
-                return soup
-                
-            except requests.exceptions.RequestException as e:
-                logging.warning(f"Request failed for {url} using proxy {proxy} (attempt {attempt + 1}/{max_retries}): {str(e)}")
-            except ValueError as e:
-                logging.warning(f"Invalid content from {url} using proxy {proxy} (attempt {attempt + 1}/{max_retries}): {str(e)}")
-            except Exception as e:
-                logging.warning(f"Unexpected error fetching {url} using proxy {proxy} (attempt {attempt + 1}/{max_retries}): {str(e)}")
-                
-            if attempt == max_retries - 1:
-                logging.warning(f"Failed to fetch {url} with proxy {proxy} after {max_retries} attempts, trying next proxy")
-                break
-                
-            time.sleep(1 * (attempt + 1))  # Exponential backoff
-    
-    logging.error(f"Failed to fetch {url} after trying all proxies")
-    return None
 
 
 def handle_job_insert(supabase: any, job_urls: list[tuple[str, str]], job_site: JobSite):
