@@ -967,7 +967,6 @@ def handle_job_insert(supabase: any, job_urls: list[tuple[str, str]], job_site: 
 
             # Update URLs
             job_details["application_url"] = apply_url
-            job_details["source_url"] = desc_url
             
             # Generate unique hash for the job
             job_hash = generate_job_hash(job_details)
@@ -987,7 +986,6 @@ def handle_job_insert(supabase: any, job_urls: list[tuple[str, str]], job_site: 
                 "qualifications": "{" + ",".join(f'"{q}"' for q in job_details["qualifications"]) + "}" if job_details["qualifications"] else None,
                 "benefits": "{" + ",".join(f'"{b}"' for b in job_details["benefits"]) + "}" if job_details["benefits"] else None,
                 "application_url": job_details["application_url"],
-                "source_url": job_details["source_url"],
                 "company_logo": job_details["company_logo"],
                 "source": job_details["source"],
                 "posted_date": job_details["posted_date"],
@@ -999,7 +997,7 @@ def handle_job_insert(supabase: any, job_urls: list[tuple[str, str]], job_site: 
                 "salary_currency": job_details["salary_currency"],
                 "salary_type": job_details["salary_type"],
                 "last_updated": datetime.now().isoformat(),
-                "job_hash": job_hash  # Add the unique hash
+                "job_hash": job_hash
             }
 
             print(f"Processing job from {job_site.name}: {supabase_job['title']} at {supabase_job['company']}")
