@@ -1,14 +1,3 @@
-# Job Scraper
-
-Automated job scraper that collects job postings from various job boards and stores them in a Supabase database.
-
-## Features
-- Scrapes jobs from Lever, Greenhouse, and Ashby job boards
-- Runs every 6 hours via GitHub Actions
-- Stores data in Supabase
-- Automatic error reporting
-- Secure credential handling
-
 ## Setup
 
 1. **Environment Variables**
