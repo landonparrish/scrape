@@ -1,6 +1,6 @@
 import re
 from bs4 import BeautifulSoup
-from typing import List
+from typing import List, Dict
 
 class TextProcessor:
     @staticmethod
@@ -72,4 +72,33 @@ class TextProcessor:
         # Remove common prefixes
         location = re.sub(r'^(location|where)\s*:\s*', '', location, flags=re.IGNORECASE)
         
-        return location.strip() 
+        return location.strip()
+
+    @staticmethod
+    def process_job_details(job_details: Dict) -> Dict:
+        """Process job details with basic text cleaning."""
+        processed = {}
+        
+        # Process text fields
+        for field in ['title', 'company', 'location', 'description']:
+            if job_details.get(field):
+                processed[field] = TextProcessor.clean_html(job_details[field])
+            else:
+                processed[field] = job_details.get(field)
+        
+        # Process lists
+        for field in ['requirements', 'benefits', 'work_types']:
+            if job_details.get(field):
+                if isinstance(job_details[field], str):
+                    processed[field] = TextProcessor.extract_bullet_points(job_details[field])
+                else:
+                    processed[field] = job_details[field]
+            else:
+                processed[field] = job_details.get(field, [])
+        
+        # Copy other fields as is
+        for field in job_details:
+            if field not in processed:
+                processed[field] = job_details[field]
+        
+        return processed 
