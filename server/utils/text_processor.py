@@ -3,18 +3,30 @@ import re
 from typing import List, Optional, Dict
 
 class TextProcessor:
-    # Section identifiers for better content detection
+    # Enhanced section identifiers for better content detection
     SECTION_IDENTIFIERS = {
+        'summary': [
+            'about the role', 'overview', 'position summary', 'job summary',
+            'role overview', 'the opportunity', 'position overview',
+            'what you\'ll do', 'responsibilities', 'the role'
+        ],
         'requirements': [
             'requirements', 'what you\'ll need', 'qualifications',
             'key skills', 'must have', 'required skills',
             'technical requirements', 'minimum qualifications',
-            'basic qualifications', 'essential skills'
+            'basic qualifications', 'essential skills',
+            'what we\'re looking for', 'who you are'
+        ],
+        'qualifications': [
+            'preferred qualifications', 'nice to have', 'desired skills',
+            'additional qualifications', 'preferred skills',
+            'bonus points', 'ideal candidate', 'great if you have'
         ],
         'benefits': [
             'benefits', 'perks', 'what we offer', 'why join us',
             'compensation', 'what\'s in it for you', 'rewards',
-            'total compensation', 'package includes', 'we provide'
+            'total compensation', 'package includes', 'we provide',
+            'why work here', 'what you\'ll get'
         ]
     }
 
@@ -26,12 +38,31 @@ class TextProcessor:
     }
 
     @staticmethod
-    def identify_section(text: str) -> str:
-        """Identify which section a text belongs to based on keywords."""
+    def identify_section(text: str, content: str = None) -> str:
+        """
+        Identify which section a text belongs to based on keywords and content analysis.
+        Now also looks at the content following the header for additional context.
+        """
         text_lower = text.lower()
+        
+        # First try direct matches
         for section, identifiers in TextProcessor.SECTION_IDENTIFIERS.items():
             if any(identifier in text_lower for identifier in identifiers):
                 return section
+                
+        # If content is provided, use it for additional context
+        if content:
+            content_lower = content.lower()
+            # Look for requirement indicators in content
+            if any(word in content_lower for word in ['required', 'must have', 'essential']):
+                return 'requirements'
+            # Look for qualification indicators
+            if any(word in content_lower for word in ['preferred', 'nice to have', 'ideal']):
+                return 'qualifications'
+            # Look for benefit indicators
+            if any(word in content_lower for word in ['offer', 'provide', 'package', 'compensation']):
+                return 'benefits'
+                
         return 'other'
 
     @staticmethod
@@ -113,13 +144,42 @@ class TextProcessor:
 
     @staticmethod
     def extract_bullet_points(text: str) -> List[str]:
-        """Extract bullet points from text into a list."""
+        """Enhanced bullet point extraction with better cleaning."""
         if not text:
             return []
+        
+        # Split by common bullet point indicators
+        points = []
+        
+        # First try to split by HTML list items
+        soup = BeautifulSoup(text, 'html.parser')
+        li_items = soup.find_all('li')
+        if li_items:
+            points.extend([item.get_text().strip() for item in li_items])
+        else:
+            # If no HTML lists, try other bullet point patterns
+            bullet_patterns = [
+                r'[•●■◆▪️-]\s*([^•●■◆▪️-][^\n]+)',  # Common bullet points
+                r'^\s*\d+\.\s+([^\n]+)',  # Numbered lists
+                r'^\s*[A-Za-z]\)\s+([^\n]+)',  # Letter lists
+                r'(?m)^\s*[-*]\s+([^\n]+)'  # Markdown-style lists
+            ]
             
-        # Split by bullet points and clean
-        points = [p.strip() for p in text.split('•') if p.strip()]
-        return points
+            for pattern in bullet_patterns:
+                matches = re.finditer(pattern, text, re.MULTILINE)
+                points.extend([match.group(1).strip() for match in matches])
+        
+        # Clean and normalize points
+        cleaned_points = []
+        for point in points:
+            # Remove any remaining bullet points or numbers
+            point = re.sub(r'^(?:\d+\.|[•●■◆▪️-]|\([A-Za-z]\))\s*', '', point)
+            # Clean whitespace
+            point = ' '.join(point.split())
+            if point and len(point) > 5:  # Only keep substantial points
+                cleaned_points.append(point)
+                
+        return list(dict.fromkeys(cleaned_points))  # Remove duplicates while preserving order
 
     @staticmethod
     def clean_requirements(requirements: List[str]) -> List[str]:
@@ -192,18 +252,77 @@ class TextProcessor:
             return cleaned_text
 
     @staticmethod
+    def summarize_text(text: str, max_length: int = 500) -> str:
+        """
+        Summarize text by extracting key sentences.
+        This is a simple extractive summarization - we could replace this with an LLM call.
+        """
+        if not text or len(text) <= max_length:
+            return text
+            
+        # Split into sentences
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        
+        # Score sentences based on importance indicators
+        scored_sentences = []
+        important_phrases = [
+            'responsible for', 'will be', 'looking for',
+            'role involves', 'position requires', 'you\'ll be',
+            'key responsibilities', 'main duties'
+        ]
+        
+        for sentence in sentences:
+            score = 0
+            # Longer sentences likely contain more information
+            score += min(len(sentence.split()), 20) * 0.1
+            # Sentences with important phrases score higher
+            score += sum(2 for phrase in important_phrases if phrase in sentence.lower())
+            # First and last sentences often contain key information
+            if sentence == sentences[0]:
+                score += 3
+            elif sentence == sentences[-1]:
+                score += 1
+            
+            scored_sentences.append((score, sentence))
+            
+        # Sort by score and take top sentences
+        scored_sentences.sort(reverse=True)
+        summary = []
+        current_length = 0
+        
+        for _, sentence in scored_sentences:
+            if current_length + len(sentence) > max_length:
+                break
+            summary.append(sentence)
+            current_length += len(sentence)
+            
+        return ' '.join(summary)
+
+    @staticmethod
     def process_job_details(job_details: dict) -> dict:
-        """Process all job details fields with enhanced cleaning."""
+        """Enhanced job details processing with better section handling and summarization."""
         processed = {}
         
         for field, content in job_details.items():
             if isinstance(content, str):
-                processed[field] = TextProcessor.process_job_field(field, content)
+                if field == 'description':
+                    # Summarize the description
+                    processed[field] = TextProcessor.summarize_text(content)
+                else:
+                    processed[field] = TextProcessor.process_job_field(field, content)
             elif isinstance(content, list):
-                if field == 'requirements':
-                    processed[field] = TextProcessor.clean_requirements(content)
-                elif field == 'benefits':
-                    processed[field] = TextProcessor.clean_benefits(content)
+                if field in ['requirements', 'qualifications', 'benefits']:
+                    # Clean and normalize list items
+                    cleaned_items = []
+                    for item in content:
+                        # Remove duplicates and near-duplicates
+                        item = TextProcessor.clean_html(item)
+                        if item and not any(
+                            existing.lower() in item.lower() or item.lower() in existing.lower()
+                            for existing in cleaned_items
+                        ):
+                            cleaned_items.append(item)
+                    processed[field] = cleaned_items
                 else:
                     processed[field] = content
             else:

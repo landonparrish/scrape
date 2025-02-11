@@ -76,7 +76,7 @@ def find_jobs(
     keyword: str,
     job_sites: list[JobSite],
     tbs: TBS | None,
-    max_results: int = 200,
+    max_results: int = 1000,  # Increased from 200
     location_urls: dict[JobSite, str] | None = None,
 ):
     """
@@ -90,6 +90,12 @@ def find_jobs(
         for job_site, url in location_urls.items():
             if job_site == JobSite.WELLFOUND:
                 job_urls_by_board[job_site] = crawl_wellfound_jobs(url)
+            elif job_site == JobSite.LEVER:
+                job_urls_by_board[job_site] = crawl_lever_jobs(url)
+            elif job_site == JobSite.GREENHOUSE:
+                job_urls_by_board[job_site] = crawl_greenhouse_jobs(url)
+            elif job_site == JobSite.ASHBY:
+                job_urls_by_board[job_site] = crawl_ashby_jobs(url)
 
     # Then do Google search for remaining job sites
     remaining_sites = [site for site in job_sites if site not in job_urls_by_board]
@@ -100,27 +106,37 @@ def find_jobs(
         success = False
         result = []
 
-        while not success:
+        while not success and proxy_index < len(proxies):
             try:
                 proxy = proxies[proxy_index]
                 proxy_index += 1
 
-                if proxy_index >= len(proxies):
-                    print("No more proxies to try.")
-                    break
                 search_sites = " OR ".join([f"site:{site.value}" for site in remaining_sites])
                 search_query = f"{keyword} {search_sites}"
                 print(f"Searching for {search_query} using proxy {proxy}")
-                client = yagooglesearch.SearchClient(
-                    search_query,
-                    tbs=tbs.value if tbs else None,
-                    max_search_result_urls_to_return=max_results,
-                    proxy=proxy,
-                    verbosity=0,
-                )
-                client.assign_random_user_agent()
-                result = client.search()
-                success = True
+                
+                # Split into multiple searches with different time ranges to get more results
+                time_ranges = [TBS.PAST_TWELVE_HOURS, TBS.PAST_DAY, TBS.PAST_WEEK] if not tbs else [tbs]
+                all_results = []
+                
+                for time_range in time_ranges:
+                    try:
+                        client = yagooglesearch.SearchClient(
+                            search_query,
+                            tbs=time_range.value,
+                            max_search_result_urls_to_return=max_results // len(time_ranges),
+                            proxy=proxy,
+                            verbosity=0,
+                        )
+                        client.assign_random_user_agent()
+                        results = client.search()
+                        all_results.extend(results)
+                    except Exception as e:
+                        print(f"Error searching with time range {time_range}: {e}")
+                        continue
+                
+                result = list(set(all_results))  # Remove duplicates
+                success = bool(result)
             except Exception as e:
                 print(f"Error using proxy {proxy}: ", e)
 
@@ -132,6 +148,60 @@ def find_jobs(
             job_urls_by_board[job_site] = cleaner.clean(job_urls_for_job_site)
 
     return job_urls_by_board
+
+
+def crawl_lever_jobs(base_url: str) -> list[str]:
+    """Crawl Lever job board directly."""
+    job_urls = []
+    try:
+        response = requests.get(base_url)
+        soup = BeautifulSoup(response.content, "html.parser")
+        
+        # Find all job links
+        for link in soup.find_all("a", href=re.compile(r"https://jobs\.lever\.co/[^/]+/[^/]+")):
+            job_urls.append(link["href"])
+            
+    except Exception as e:
+        logging.error(f"Error crawling Lever jobs from {base_url}: {str(e)}")
+    
+    return list(set(job_urls))
+
+
+def crawl_greenhouse_jobs(base_url: str) -> list[str]:
+    """Crawl Greenhouse job board directly."""
+    job_urls = []
+    try:
+        response = requests.get(base_url)
+        soup = BeautifulSoup(response.content, "html.parser")
+        
+        # Find all job links
+        for link in soup.find_all("a", href=re.compile(r"/jobs/\d+")):
+            href = link["href"]
+            if not href.startswith("http"):
+                href = f"https://boards.greenhouse.io{href}"
+            job_urls.append(href)
+            
+    except Exception as e:
+        logging.error(f"Error crawling Greenhouse jobs from {base_url}: {str(e)}")
+    
+    return list(set(job_urls))
+
+
+def crawl_ashby_jobs(base_url: str) -> list[str]:
+    """Crawl Ashby job board directly."""
+    job_urls = []
+    try:
+        response = requests.get(base_url)
+        soup = BeautifulSoup(response.content, "html.parser")
+        
+        # Find all job links
+        for link in soup.find_all("a", href=re.compile(r"https://jobs\.ashbyhq\.com/[^/]+/[a-f0-9-]+")):
+            job_urls.append(link["href"])
+            
+    except Exception as e:
+        logging.error(f"Error crawling Ashby jobs from {base_url}: {str(e)}")
+    
+    return list(set(job_urls))
 
 
 def get_lever_job_details(link: str) -> dict:
@@ -569,210 +639,256 @@ def get_greenhouse_job_details(link: str) -> dict:
 
 
 def get_ashby_job_details(link: str) -> dict:
-    response = requests.get(link)
-    soup = BeautifulSoup(response.content, "html.parser")
+    try:
+        response = requests.get(link)
+        soup = BeautifulSoup(response.content, "html.parser")
 
-    # Basic job info - Ashby uses specific data-testid attributes
-    title_elem = soup.find("h1", {"data-testid": "job-title"}) or soup.find("h1")
-    position = title_elem.text.strip() if title_elem else None
-
-    # Company info - try multiple methods
-    company_name = None
-    # Method 1: From URL
-    company_match = re.search(r'jobs\.ashbyhq\.com/([^/]+)', link)
-    if company_match:
-        company_name = company_match.group(1).replace("-", " ").title()
-    
-    # Method 2: From meta tags
-    if not company_name:
-        meta_title = soup.find("meta", property="og:title")
-        if meta_title:
-            title_parts = meta_title["content"].split(" at ")
-            if len(title_parts) > 1:
-                company_name = title_parts[1].strip()
-
-    # Company Logo - Ashby uses og:image for company logos
-    company_logo = None
-    meta_image = soup.find("meta", property="og:image")
-    if meta_image:
-        company_logo = meta_image["content"]
-
-    # Location - Ashby has specific data-testid for location
-    location = ""
-    location_elem = soup.find("div", {"data-testid": "job-location"})
-    if location_elem:
-        location = location_elem.text.strip()
-
-    # Job description and sections
-    description_parts = []
-    requirements = []
-    benefits = []
-    
-    # Main content is in data-testid="job-description"
-    main_content = soup.find("div", {"data-testid": "job-description"})
-    if main_content:
-        current_section = "description"
-        current_content = []
+        # Enhanced title extraction with multiple fallback methods
+        position = None
         
-        for elem in main_content.children:
-            if elem.name in ['h1', 'h2', 'h3', 'h4', 'h5']:
-                # Process previous section
-                if current_content:
-                    cleaned = TextProcessor.clean_html('\n'.join(map(str, current_content)))
-                    if current_section == 'requirements':
-                        requirements.extend(TextProcessor.extract_bullet_points(cleaned))
-                    elif current_section == 'benefits':
-                        benefits.extend(TextProcessor.extract_bullet_points(cleaned))
-                    else:
-                        description_parts.append(cleaned)
-                
-                # Determine new section
-                heading = elem.get_text().lower().strip()
-                if any(kw in heading for kw in ["requirement", "qualification", "what you'll need", "what we're looking for"]):
-                    current_section = "requirements"
-                elif any(kw in heading for kw in ["benefit", "perks", "what we offer", "why join us", "what's in it for you"]):
-                    current_section = "benefits"
+        # Method 1: Look for data-testid="job-title"
+        title_elem = soup.find("h1", {"data-testid": "job-title"})
+        if title_elem:
+            position = title_elem.text.strip()
+            logging.info(f"Found title using data-testid: {position}")
+        
+        # Method 2: Look for og:title meta tag
+        if not position:
+            meta_title = soup.find("meta", property="og:title")
+            if meta_title:
+                title_content = meta_title["content"]
+                # Usually in format "Job Title at Company Name"
+                if " at " in title_content:
+                    position = title_content.split(" at ")[0].strip()
                 else:
-                    current_section = "description"
-                current_content = []
-            else:
-                current_content.append(str(elem))
+                    position = title_content.strip()
+                logging.info(f"Found title using og:title: {position}")
         
-        # Process the last section
-        if current_content:
-            cleaned = TextProcessor.clean_html('\n'.join(map(str, current_content)))
-            if current_section == 'requirements':
-                requirements.extend(TextProcessor.extract_bullet_points(cleaned))
-            elif current_section == 'benefits':
-                benefits.extend(TextProcessor.extract_bullet_points(cleaned))
-            else:
-                description_parts.append(cleaned)
-
-    # Combine description parts
-    description = '\n\n'.join(description_parts)
-
-    # Employment Type
-    employment_type = None
-    employment_elem = soup.find("div", {"data-testid": "job-type"})
-    if employment_elem:
-        employment_type = employment_elem.text.strip().lower()
-
-    # Remote Status and Work Types
-    remote = False
-    work_types = []
-    
-    # Check location and description for work type indicators
-    texts_to_check = [location, description]
-    for text in texts_to_check:
-        if text:
-            text_lower = text.lower()
-            if any(term in text_lower for term in ['remote', 'work from home', 'wfh']):
-                remote = True
-                if "remote" not in work_types:
-                    work_types.append("remote")
-            if "hybrid" in text_lower and "hybrid" not in work_types:
-                work_types.append("hybrid")
-            if any(x in text_lower for x in ["on-site", "onsite", "in office", "in-office"]) and "on-site" not in work_types:
-                work_types.append("on-site")
-
-    # Salary detection
-    salary = None
-    salary_min = None
-    salary_max = None
-    salary_currency = None
-    salary_type = None
-    
-    # Look for salary in compensation section and description
-    salary_elem = soup.find("div", {"data-testid": "compensation"})
-    salary_texts = [description]
-    if salary_elem:
-        salary_texts.insert(0, salary_elem.text)
-
-    salary_patterns = [
-        r'\$\d{2,3}(?:,\d{3})*(?:\s*-\s*\$\d{2,3}(?:,\d{3})*)?(?:\s*k)?(?:\s*per\s*year)?',
-        r'\$\d{2,3}(?:,\d{3})*(?:\s*k)?(?:\s*-\s*\$\d{2,3}(?:,\d{3})*(?:\s*k)?)?'
-    ]
-
-    for text in salary_texts:
-        if not text:
-            continue
-        for pattern in salary_patterns:
-            match = re.search(pattern, text)
-            if match:
-                salary = match.group(0)
-                # Extract numbers
-                numbers = re.findall(r'\d+(?:,\d{3})*', salary)
-                if numbers:
-                    salary_min = int(numbers[0].replace(',', ''))
-                    if len(numbers) > 1:
-                        salary_max = int(numbers[1].replace(',', ''))
-                    salary_currency = '$'
-                    if 'per year' in text.lower() or 'annually' in text.lower():
-                        salary_type = 'yearly'
-                    elif 'per hour' in text.lower() or 'hourly' in text.lower():
-                        salary_type = 'hourly'
+        # Method 3: Look for any h1 that might contain the job title
+        if not position:
+            h1_tags = soup.find_all("h1")
+            for h1 in h1_tags:
+                text = h1.text.strip()
+                if text and not any(x in text.lower() for x in ["welcome", "about us", "join us"]):
+                    position = text
+                    logging.info(f"Found title using h1: {position}")
                     break
-        if salary:
-            break
+        
+        # Method 4: Extract from URL as last resort
+        if not position:
+            job_id_match = re.search(r'/([a-f0-9-]+)(?:/application)?$', link)
+            if job_id_match:
+                # Convert job ID to title case as a last resort
+                position = job_id_match.group(1).replace('-', ' ').title()
+                logging.info(f"Generated title from URL: {position}")
 
-    # Experience Level
-    experience_level = None
-    experience_patterns = [
-        (r'\b(?:senior|sr\.?\s*|lead)\b', 'senior'),
-        (r'\b(?:junior|jr\.?\s*)\b', 'junior'),
-        (r'\b(?:mid[- ]level|mid\s+senior)\b', 'mid-level'),
-        (r'\b(?:principal|staff|director)\b', 'principal'),
-        (r'\b(?:entry[- ]level|fresh\s*graduate|new\s*grad)\b', 'entry-level')
-    ]
-    
-    for pattern, level in experience_patterns:
-        if re.search(pattern, position.lower() if position else '') or re.search(pattern, description.lower()):
-            experience_level = level
-            break
+        # If we still don't have a title, use a placeholder
+        if not position:
+            position = "Open Position"
+            logging.warning(f"No title found for {link}, using placeholder")
+        
+        # Company info - try multiple methods
+        company_name = None
+        # Method 1: From URL
+        company_match = re.search(r'jobs\.ashbyhq\.com/([^/]+)', link)
+        if company_match:
+            company_name = company_match.group(1).replace("-", " ").title()
+        
+        # Method 2: From meta tags
+        if not company_name:
+            meta_title = soup.find("meta", property="og:title")
+            if meta_title:
+                title_parts = meta_title["content"].split(" at ")
+                if len(title_parts) > 1:
+                    company_name = title_parts[1].strip()
 
-    # Posted Date and Expiration
-    posted_date = datetime.now().isoformat()
-    expires_at = (datetime.now() + timedelta(days=30)).isoformat()
+        # Company Logo - Ashby uses og:image for company logos
+        company_logo = None
+        meta_image = soup.find("meta", property="og:image")
+        if meta_image:
+            company_logo = meta_image["content"]
 
-    # Try to find actual posted date
-    posted_date_elem = soup.find("div", {"data-testid": "job-posted-date"})
-    if posted_date_elem:
-        try:
-            relative_date = posted_date_elem.text.strip()
-            if "day" in relative_date:
-                days = int(re.search(r'\d+', relative_date).group())
-                posted_date = (datetime.now() - timedelta(days=days)).isoformat()
-        except:
-            pass
+        # Location - Ashby has specific data-testid for location
+        location = ""
+        location_elem = soup.find("div", {"data-testid": "job-location"})
+        if location_elem:
+            location = location_elem.text.strip()
 
-    # Create job details
-    job_details = {
-        "title": position,
-        "company": company_name,
-        "location": location,
-        "description": description,
-        "salary": salary,
-        "remote": remote,
-        "work_types": work_types,
-        "employment_type": employment_type,
-        "experience_level": experience_level,
-        "requirements": requirements,
-        "qualifications": [],  # Ashby typically combines requirements and qualifications
-        "benefits": benefits,
-        "application_url": link,
-        "company_logo": company_logo,
-        "source": "ashby",
-        "posted_date": posted_date,
-        "expires_at": expires_at,
-        "salary_min": salary_min,
-        "salary_max": salary_max,
-        "salary_currency": salary_currency,
-        "salary_type": salary_type,
-        "scraped_at": datetime.now().isoformat(),
-        "status": "active"
-    }
+        # Job description and sections
+        description_parts = []
+        requirements = []
+        benefits = []
+        
+        # Main content is in data-testid="job-description"
+        main_content = soup.find("div", {"data-testid": "job-description"})
+        if main_content:
+            current_section = "description"
+            current_content = []
+            
+            for elem in main_content.children:
+                if elem.name in ['h1', 'h2', 'h3', 'h4', 'h5']:
+                    # Process previous section
+                    if current_content:
+                        cleaned = TextProcessor.clean_html('\n'.join(map(str, current_content)))
+                        if current_section == 'requirements':
+                            requirements.extend(TextProcessor.extract_bullet_points(cleaned))
+                        elif current_section == 'benefits':
+                            benefits.extend(TextProcessor.extract_bullet_points(cleaned))
+                        else:
+                            description_parts.append(cleaned)
+                    
+                    # Determine new section
+                    heading = elem.get_text().lower().strip()
+                    if any(kw in heading for kw in ["requirement", "qualification", "what you'll need", "what we're looking for"]):
+                        current_section = "requirements"
+                    elif any(kw in heading for kw in ["benefit", "perks", "what we offer", "why join us", "what's in it for you"]):
+                        current_section = "benefits"
+                    else:
+                        current_section = "description"
+                    current_content = []
+                else:
+                    text = elem.get_text().strip()
+                    if text:
+                        current_content.append(text)
+            
+            # Process the last section
+            if current_content:
+                cleaned = TextProcessor.clean_html('\n'.join(map(str, current_content)))
+                if current_section == 'requirements':
+                    requirements.extend(TextProcessor.extract_bullet_points(cleaned))
+                elif current_section == 'benefits':
+                    benefits.extend(TextProcessor.extract_bullet_points(cleaned))
+                else:
+                    description_parts.append(cleaned)
 
-    return TextProcessor.process_job_details(job_details)
+        # Combine description parts
+        description = '\n\n'.join(description_parts)
+
+        # Employment Type
+        employment_type = None
+        employment_elem = soup.find("div", {"data-testid": "job-type"})
+        if employment_elem:
+            employment_type = employment_elem.text.strip().lower()
+
+        # Remote Status and Work Types
+        remote = False
+        work_types = []
+        
+        # Check location and description for work type indicators
+        texts_to_check = [location, description]
+        for text in texts_to_check:
+            if text:
+                text_lower = text.lower()
+                if any(term in text_lower for term in ['remote', 'work from home', 'wfh']):
+                    remote = True
+                    if "remote" not in work_types:
+                        work_types.append("remote")
+                if "hybrid" in text_lower and "hybrid" not in work_types:
+                    work_types.append("hybrid")
+                if any(x in text_lower for x in ["on-site", "onsite", "in office", "in-office"]) and "on-site" not in work_types:
+                    work_types.append("on-site")
+
+        # Salary detection
+        salary = None
+        salary_min = None
+        salary_max = None
+        salary_currency = None
+        salary_type = None
+        
+        # Look for salary in compensation section and description
+        salary_elem = soup.find("div", {"data-testid": "compensation"})
+        salary_texts = [description]
+        if salary_elem:
+            salary_texts.insert(0, salary_elem.text)
+
+        salary_patterns = [
+            r'\$\d{2,3}(?:,\d{3})*(?:\s*-\s*\$\d{2,3}(?:,\d{3})*)?(?:\s*k)?(?:\s*per\s*year)?',
+            r'\$\d{2,3}(?:,\d{3})*(?:\s*k)?(?:\s*-\s*\$\d{2,3}(?:,\d{3})*(?:\s*k)?)?'
+        ]
+
+        for text in salary_texts:
+            if not text:
+                continue
+            for pattern in salary_patterns:
+                match = re.search(pattern, text)
+                if match:
+                    salary = match.group(0)
+                    # Extract numbers
+                    numbers = re.findall(r'\d+(?:,\d{3})*', salary)
+                    if numbers:
+                        salary_min = int(numbers[0].replace(',', ''))
+                        if len(numbers) > 1:
+                            salary_max = int(numbers[1].replace(',', ''))
+                        salary_currency = '$'
+                        if 'per year' in text.lower() or 'annually' in text.lower():
+                            salary_type = 'yearly'
+                        elif 'per hour' in text.lower() or 'hourly' in text.lower():
+                            salary_type = 'hourly'
+                        break
+            if salary:
+                break
+
+        # Experience Level
+        experience_level = None
+        experience_patterns = [
+            (r'\b(?:senior|sr\.?\s*|lead)\b', 'senior'),
+            (r'\b(?:junior|jr\.?\s*)\b', 'junior'),
+            (r'\b(?:mid[- ]level|mid\s+senior)\b', 'mid-level'),
+            (r'\b(?:principal|staff|director)\b', 'principal'),
+            (r'\b(?:entry[- ]level|fresh\s*graduate|new\s*grad)\b', 'entry-level')
+        ]
+        
+        for pattern, level in experience_patterns:
+            if re.search(pattern, position.lower() if position else '') or re.search(pattern, description.lower()):
+                experience_level = level
+                break
+
+        # Posted Date and Expiration
+        posted_date = datetime.now().isoformat()
+        expires_at = (datetime.now() + timedelta(days=30)).isoformat()
+
+        # Try to find actual posted date
+        posted_date_elem = soup.find("div", {"data-testid": "job-posted-date"})
+        if posted_date_elem:
+            try:
+                relative_date = posted_date_elem.text.strip()
+                if "day" in relative_date:
+                    days = int(re.search(r'\d+', relative_date).group())
+                    posted_date = (datetime.now() - timedelta(days=days)).isoformat()
+            except:
+                pass
+
+        # Create job details
+        job_details = {
+            "title": position,
+            "company": company_name,
+            "location": location,
+            "description": description,
+            "salary": salary,
+            "remote": remote,
+            "work_types": work_types,
+            "employment_type": employment_type,
+            "experience_level": experience_level,
+            "requirements": requirements,
+            "qualifications": [],  # Ashby typically combines requirements and qualifications
+            "benefits": benefits,
+            "application_url": link,
+            "company_logo": company_logo,
+            "source": "ashby",
+            "posted_date": posted_date,
+            "expires_at": expires_at,
+            "salary_min": salary_min,
+            "salary_max": salary_max,
+            "salary_currency": salary_currency,
+            "salary_type": salary_type,
+            "scraped_at": datetime.now().isoformat(),
+            "status": "active"
+        }
+
+        return TextProcessor.process_job_details(job_details)
+    except Exception as e:
+        logging.error(f"Error parsing Ashby job details from {link}: {str(e)}")
+        return None
 
 
 def get_wellfound_job_details(link: str) -> dict:
@@ -1105,7 +1221,6 @@ class JobSearchResultCleaner:
         try:
             return self._make_direct_apply_urls(
                 self._remove_duplicates(self._prune_urls(job_search_result))
-            )
         except Exception as e:
             print(f"Error cleaning job search result: {e}")
             return []
