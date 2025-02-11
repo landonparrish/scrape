@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 import hashlib
 import time
 from typing import Optional
+import random
 
 
 class JobSite(Enum):
@@ -606,10 +607,11 @@ def get_greenhouse_job_details(link: str) -> dict:
 
 
 def get_ashby_job_details(link: str) -> dict:
+    """Get job details from an Ashby job posting."""
     try:
         response = requests.get(link)
         soup = BeautifulSoup(response.content, "html.parser")
-
+        
         # Enhanced title extraction with multiple fallback methods
         position = None
         
@@ -731,13 +733,7 @@ def get_ashby_job_details(link: str) -> dict:
         # Combine description parts
         description = '\n\n'.join(description_parts)
 
-        # Employment Type
-        employment_type = None
-        employment_elem = soup.find("div", {"data-testid": "job-type"})
-        if employment_elem:
-            employment_type = employment_elem.text.strip().lower()
-
-        # Remote Status and Work Types
+        # Work types and remote status
         remote = False
         work_types = []
         
@@ -748,114 +744,29 @@ def get_ashby_job_details(link: str) -> dict:
                 text_lower = text.lower()
                 if any(term in text_lower for term in ['remote', 'work from home', 'wfh']):
                     remote = True
-                    if "remote" not in worktypes:
-                        worktypes.append("remote")
-                if "hybrid" in text_lower and "hybrid" not in worktypes:
-                    worktypes.append("hybrid")
-                if any(x in text_lower for x in ["on-site", "onsite", "in office", "in-office"]) and "on-site" not in worktypes:
-                    worktypes.append("on-site")
+                    if "remote" not in work_types:
+                        work_types.append("remote")
+                if "hybrid" in text_lower and "hybrid" not in work_types:
+                    work_types.append("hybrid")
+                if any(x in text_lower for x in ["on-site", "onsite", "in office", "in-office"]) and "on-site" not in work_types:
+                    work_types.append("on-site")
 
-        # Salary detection
-        salary = None
-        salary_min = None
-        salary_max = None
-        salary_currency = None
-        salary_type = None
-        
-        # Look for salary in compensation section and description
-        salary_elem = soup.find("div", {"data-testid": "compensation"})
-        salary_texts = [description]
-        if salary_elem:
-            salary_texts.insert(0, salary_elem.text)
-
-        salary_patterns = [
-            r'\$\d{2,3}(?:,\d{3})*(?:\s*-\s*\$\d{2,3}(?:,\d{3})*)?(?:\s*k)?(?:\s*per\s*year)?',
-            r'\$\d{2,3}(?:,\d{3})*(?:\s*k)?(?:\s*-\s*\$\d{2,3}(?:,\d{3})*(?:\s*k)?)?'
-        ]
-
-        for text in salary_texts:
-            if not text:
-                continue
-            for pattern in salary_patterns:
-                match = re.search(pattern, text)
-                if match:
-                    salary = match.group(0)
-                    # Extract numbers
-                    numbers = re.findall(r'\d+(?:,\d{3})*', salary)
-                    if numbers:
-                        salary_min = int(numbers[0].replace(',', ''))
-                        if len(numbers) > 1:
-                            salary_max = int(numbers[1].replace(',', ''))
-                        salary_currency = '$'
-                        if 'per year' in text.lower() or 'annually' in text.lower():
-                            salary_type = 'yearly'
-                        elif 'per hour' in text.lower() or 'hourly' in text.lower():
-                            salary_type = 'hourly'
-                        break
-                if salary:
-                    break
-
-        # Experience Level
-        experience_level = None
-        experience_patterns = [
-            (r'\b(?:senior|sr\.?\s*|lead)\b', 'senior'),
-            (r'\b(?:junior|jr\.?\s*)\b', 'junior'),
-            (r'\b(?:mid[- ]level|mid\s+senior)\b', 'mid-level'),
-            (r'\b(?:principal|staff|director)\b', 'principal'),
-            (r'\b(?:entry[- ]level|fresh\s*graduate|new\s*grad)\b', 'entry-level')
-        ]
-        
-        for pattern, level in experience_patterns:
-            if re.search(pattern, position.lower() if position else '') or re.search(pattern, description.lower()):
-                experience_level = level
-                break
-
-        # Posted Date and Expiration
-        posted_date = datetime.now().isoformat()
-        expires_at = (datetime.now() + timedelta(days=30)).isoformat()
-
-        # Try to find actual posted date
-        posted_date_elem = soup.find("div", {"data-testid": "job-posted-date"})
-        if posted_date_elem:
-            try:
-                relative_date = posted_date_elem.text.strip()
-                if "day" in relative_date:
-                    days = int(re.search(r'\d+', relative_date).group())
-                    posted_date = (datetime.now() - timedelta(days=days)).isoformat()
-            except:
-                pass
-
-        # Create job details
-        job_details = {
+        return {
             "title": position,
             "company": company_name,
             "location": location,
             "description": description,
-            "salary": salary,
-            "remote": remote,
-            "work_types": worktypes,
-            "employment_type": employment_type,
-            "experience_level": experience_level,
             "requirements": requirements,
-            "qualifications": [],  # Ashby typically combines requirements and qualifications
             "benefits": benefits,
-            "application_url": link,
             "company_logo": company_logo,
-            "source": "ashby",
-            "posted_date": posted_date,
-            "expires_at": expires_at,
-            "salary_min": salary_min,
-            "salary_max": salary_max,
-            "salary_currency": salary_currency,
-            "salary_type": salary_type,
-            "scraped_at": datetime.now().isoformat(),
-            "status": "active"
+            "remote": remote,
+            "work_types": work_types,
+            "employment_type": "full-time"  # Default
         }
-
-        return TextProcessor.process_job_details(job_details)
+            
     except Exception as e:
         logging.error(f"Error parsing Ashby job details from {link}: {str(e)}")
-        return None
+        return {}
 
 
 def get_wellfound_job_details(link: str) -> dict:
@@ -1069,10 +980,34 @@ def generate_job_hash(job_details: dict) -> str:
 
 def get_job_page_with_retry(url: str, max_retries: int = 3) -> Optional[BeautifulSoup]:
     """Fetch and parse a job page with retry logic."""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Cache-Control': 'max-age=0'
+    }
+    
     for attempt in range(max_retries):
         try:
-            response = requests.get(url, timeout=10)
+            # Add exponential backoff between retries
+            if attempt > 0:
+                sleep_time = (2 ** attempt) + random.uniform(0, 1)
+                time.sleep(sleep_time)
+            
+            response = requests.get(url, headers=headers, timeout=10)
             response.raise_for_status()
+            
+            # Add a small delay between requests to avoid rate limiting
+            time.sleep(random.uniform(1, 3))
+            
             soup = BeautifulSoup(response.content, "html.parser")
             if not soup or not soup.find("html"):
                 raise ValueError("Invalid HTML content")
