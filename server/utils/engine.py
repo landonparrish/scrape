@@ -109,7 +109,7 @@ def find_jobs(
     keyword: str,
     job_sites: list[JobSite],
     tbs: TBS | None,
-    max_results: int = 1000,  # Increased from 200
+    max_results: int = 1000,
     location_urls: dict[JobSite, str] | None = None,
 ):
     """
@@ -133,37 +133,48 @@ def find_jobs(
     # Then do Google search for remaining job sites
     remaining_sites = [site for site in job_sites if site not in job_urls_by_board]
     if remaining_sites:
+        proxies = [None] + get_free_proxies()
+        proxy_index = 0
         success = False
         result = []
 
-        try:
-            search_sites = " OR ".join([f"site:{site.value}" for site in remaining_sites])
-            search_query = f"{keyword} {search_sites}"
-            print(f"Searching for {search_query}")
-            
-            # Split into multiple searches with different time ranges to get more results
-            time_ranges = [TBS.PAST_TWELVE_HOURS, TBS.PAST_DAY, TBS.PAST_WEEK] if not tbs else [tbs]
-            all_results = []
-            
-            for time_range in time_ranges:
-                try:
-                    client = yagooglesearch.SearchClient(
-                        query=search_query,
-                        tbs=time_range.value,
-                        max_search_result_urls_to_return=max_results // len(time_ranges),
-                        verbosity=0
-                    )
-                    client.assign_random_user_agent()
-                    results = client.search()
-                    all_results.extend(results)
-                except Exception as e:
-                    print(f"Error searching with time range {time_range}: {e}")
-                    continue
-            
-            result = list(set(all_results))  # Remove duplicates
-            success = bool(result)
-        except Exception as e:
-            print(f"Error performing search: {e}")
+        while not success and proxy_index < len(proxies):
+            try:
+                proxy = proxies[proxy_index]
+                proxy_index += 1
+
+                search_sites = " OR ".join([f"site:{site.value}" for site in remaining_sites])
+                search_query = f"{keyword} {search_sites}"
+                logging.info(f"Searching for {search_query} using proxy {proxy}")
+                
+                # Split into multiple searches with different time ranges to get more results
+                time_ranges = [TBS.PAST_TWELVE_HOURS, TBS.PAST_DAY, TBS.PAST_WEEK] if not tbs else [tbs]
+                all_results = []
+                
+                for time_range in time_ranges:
+                    try:
+                        client = yagooglesearch.SearchClient(
+                            query=search_query,
+                            tbs=time_range.value,
+                            max_search_result_urls_to_return=max_results // len(time_ranges),
+                            verbosity=0,
+                            http_proxy=proxy,
+                            https_proxy=proxy
+                        )
+                        client.assign_random_user_agent()
+                        results = client.search()
+                        all_results.extend(results)
+                        # Add a small delay between searches
+                        time.sleep(random.uniform(2, 5))
+                    except Exception as e:
+                        logging.error(f"Error searching with time range {time_range}: {str(e)}")
+                        continue
+                
+                result = list(set(all_results))  # Remove duplicates
+                success = bool(result)
+            except Exception as e:
+                logging.error(f"Error using proxy {proxy}: {str(e)}")
+                continue
 
         for job_site in remaining_sites:
             job_urls_for_job_site = [
