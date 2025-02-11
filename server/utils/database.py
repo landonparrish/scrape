@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 import os
 from supabase import create_client
 from dotenv import load_dotenv
+import logging
 
 load_dotenv()
 
@@ -50,16 +51,24 @@ class SupabaseClient:
 
     def prune_jobs(self):
         """Remove old jobs and duplicates."""
-        self._refresh_schema()  # Refresh before delete
-        
-        # Remove jobs older than 2 months
-        current_time = datetime.now()
-        self.client.table("jobs").delete().lt(
-            "created_at", current_time - timedelta(days=60)
-        ).execute()
-        
-        # Keep only the most recent version of each job (based on job_hash)
-        self.client.rpc(
-            'deduplicate_jobs',
-            {}  # No parameters needed
-        ).execute()
+        try:
+            self._refresh_schema()  # Refresh before operations
+            
+            # Remove jobs older than 2 months based on scraped_at
+            current_time = datetime.now()
+            old_jobs_query = self.client.table("jobs").delete().lt(
+                "scraped_at", (current_time - timedelta(days=60)).isoformat()
+            )
+            old_jobs_result = old_jobs_query.execute()
+            logging.info(f"Removed {len(old_jobs_result.data) if old_jobs_result.data else 0} old jobs")
+            
+            # Keep only the most recent version of each job based on job_hash
+            dedup_result = self.client.rpc(
+                'deduplicate_jobs',
+                {}  # No parameters needed
+            ).execute()
+            logging.info(f"Deduplication complete: {dedup_result.data if dedup_result.data else 'No duplicates found'}")
+            
+        except Exception as e:
+            logging.error(f"Error pruning jobs: {str(e)}", exc_info=True)
+            raise

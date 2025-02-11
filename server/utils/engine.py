@@ -8,6 +8,8 @@ import re
 import logging
 from datetime import datetime, timedelta
 import hashlib
+import time
+from typing import Optional
 
 
 class JobSite(Enum):
@@ -441,231 +443,250 @@ def get_lever_job_details(link: str) -> dict:
 
 
 def get_greenhouse_job_details(link: str) -> dict:
-    response = requests.get(link)
-    soup = BeautifulSoup(response.content, "html.parser")
-    head = soup.find("head")
+    """Get job details from a Greenhouse job posting with improved error handling."""
+    try:
+        soup = get_job_page_with_retry(link)
+        if not soup:
+            logging.warning(f"Failed to fetch Greenhouse job page: {link}")
+            return None
+            
+        head = soup.find("head")
+        if not head:
+            logging.warning(f"No head section found in Greenhouse job page: {link}")
+            return None
 
-    # Basic job info with improved parsing
-    title_elem = soup.find("h1")
-    position = title_elem.text.strip() if title_elem else "Unknown"
+        # Basic job info with improved parsing
+        title_elem = soup.find("h1")
+        position = title_elem.text.strip() if title_elem else "Unknown"
 
-    # Company info
-    company_logo = None
-    company_name = None
-    
-    # Try multiple ways to get company logo
-    logo_elem = soup.find("img", {"class": "logo"}) or soup.find("img", {"alt": lambda x: x and "Logo" in x})
-    if logo_elem and logo_elem.get("src"):
-        company_logo = logo_elem["src"]
-        if not company_logo.startswith("http"):
-            company_logo = "https:" + company_logo if company_logo.startswith("//") else "https://" + company_logo
-
-    # Try to get company name from URL first, then fallback to other methods
-    company_match = re.search(r'boards\.greenhouse\.io/([^/]+)', link)
-    if company_match:
-        company_name = company_match.group(1).replace("-", " ").title()
-        # Clean up common suffixes
-        company_name = re.sub(r'(?i)(usa|inc|llc|corp)$', '', company_name).strip()
-    
-    # Location with multiple location support
-    locations = []
-    location_elem = soup.find("div", {"class": "location"})
-    if location_elem:
-        # Split on common location separators and clean
-        raw_locations = re.split(r'[;,]|\s*or\s*|\s*\|\s*', location_elem.text.strip())
-        locations = [loc.strip() for loc in raw_locations if loc.strip()]
-    location = "; ".join(locations) if locations else ""
-
-    # Enhanced section detection
-    requirements = []
-    qualifications = []
-    benefits = []
-    description_parts = []
-
-    # Look for specific section headers
-    section_mapping = {
-        r'(?i)about (the role|this position|this opportunity)': 'description',
-        r'(?i)requirements|qualifications|what you.ll need|what we.re looking for': 'requirements',
-        r'(?i)benefits|perks|what we offer|why join us': 'benefits',
-        r'(?i)responsibilities|what you.ll do|key responsibilities': 'description',
-        r'(?i)about (us|the team|the company)': 'description'
-    }
-
-    # Process each section
-    for section in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5']):
-        section_title = section.get_text().strip()
-        section_type = 'other'
+        # Company info with better error handling
+        company_logo = None
+        company_name = None
         
-        # Determine section type based on patterns
-        for pattern, s_type in section_mapping.items():
-            if re.search(pattern, section_title, re.IGNORECASE):
-                section_type = s_type
+        try:
+            # Try multiple ways to get company logo
+            logo_elem = soup.find("img", {"class": "logo"}) or soup.find("img", {"alt": lambda x: x and "Logo" in x})
+            if logo_elem and logo_elem.get("src"):
+                company_logo = logo_elem["src"]
+                if not company_logo.startswith("http"):
+                    company_logo = "https:" + company_logo if company_logo.startswith("//") else "https://" + company_logo
+        except Exception as e:
+            logging.warning(f"Error extracting company logo: {str(e)}")
+
+        # Try to get company name from URL first, then fallback to other methods
+        try:
+            company_match = re.search(r'boards\.greenhouse\.io/([^/]+)', link)
+            if company_match:
+                company_name = company_match.group(1).replace("-", " ").title()
+                # Clean up common suffixes
+                company_name = re.sub(r'(?i)(usa|inc|llc|corp)$', '', company_name).strip()
+        except Exception as e:
+            logging.warning(f"Error extracting company name: {str(e)}")
+            company_name = "Unknown Company"
+
+        # Location with multiple location support
+        locations = []
+        location_elem = soup.find("div", {"class": "location"})
+        if location_elem:
+            # Split on common location separators and clean
+            raw_locations = re.split(r'[;,]|\s*or\s*|\s*\|\s*', location_elem.text.strip())
+            locations = [loc.strip() for loc in raw_locations if loc.strip()]
+        location = "; ".join(locations) if locations else ""
+
+        # Enhanced section detection
+        requirements = []
+        qualifications = []
+        benefits = []
+        description_parts = []
+
+        # Look for specific section headers
+        section_mapping = {
+            r'(?i)about (the role|this position|this opportunity)': 'description',
+            r'(?i)requirements|qualifications|what you.ll need|what we.re looking for': 'requirements',
+            r'(?i)benefits|perks|what we offer|why join us': 'benefits',
+            r'(?i)responsibilities|what you.ll do|key responsibilities': 'description',
+            r'(?i)about (us|the team|the company)': 'description'
+        }
+
+        # Process each section
+        for section in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5']):
+            section_title = section.get_text().strip()
+            section_type = 'other'
+            
+            # Determine section type based on patterns
+            for pattern, s_type in section_mapping.items():
+                if re.search(pattern, section_title, re.IGNORECASE):
+                    section_type = s_type
+                    break
+
+            # Get the content following this section header
+            content = []
+            current = section.find_next()
+            while current and current.name not in ['h1', 'h2', 'h3', 'h4', 'h5']:
+                if current.name in ['p', 'li', 'ul', 'div']:
+                    content.append(current.decode_contents())
+                current = current.find_next()
+
+            # Clean and process the content
+            cleaned_content = TextProcessor.clean_html('\n'.join(content))
+
+            # Sort into appropriate category
+            if section_type == 'requirements':
+                requirements.extend(TextProcessor.extract_bullet_points(cleaned_content))
+            elif section_type == 'benefits':
+                benefits.extend(TextProcessor.extract_bullet_points(cleaned_content))
+            else:
+                description_parts.append(cleaned_content)
+
+        # Combine description parts
+        description = '\n\n'.join(description_parts)
+
+        # Enhanced salary detection
+        salary = None
+        salary_min = None
+        salary_max = None
+        salary_currency = None
+        salary_type = None
+
+        # Look for salary in specific compensation sections and description
+        salary_section = soup.find(lambda tag: tag.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'div'] and 
+                                 re.search(r'(?i)compensation|salary', tag.text))
+        
+        salary_patterns = [
+            r'\$\d{2,3}(?:,\d{3})*(?:\s*-\s*\$\d{2,3}(?:,\d{3})*)?(?:\s*k)?(?:\s*per\s*year)?',
+            r'\$\d{2,3}(?:,\d{3})*(?:\s*k)?(?:\s*-\s*\$\d{2,3}(?:,\d{3})*(?:\s*k)?)?',
+            r'(?i)(\$\d{2,3}(?:,\d{3})*(?:\s*k)?)\s*(?:to|-)\s*(\$\d{2,3}(?:,\d{3})*(?:\s*k)?)',
+            r'(?i)salary range[:\s]+(\$[\d,]+k?)\s*(?:to|-)\s*(\$[\d,]+k?)'
+        ]
+
+        salary_texts = [description]
+        if salary_section:
+            next_elem = salary_section.find_next()
+            while next_elem and next_elem.name not in ['h1', 'h2', 'h3', 'h4', 'h5']:
+                salary_texts.append(next_elem.get_text())
+                next_elem = next_elem.find_next()
+
+        for text in salary_texts:
+            if not text:
+                continue
+            for pattern in salary_patterns:
+                match = re.search(pattern, text)
+                if match:
+                    salary = match.group(0)
+                    # Extract numbers
+                    numbers = re.findall(r'\d+(?:,\d{3})*(?:k)?', salary)
+                    if numbers:
+                        # Convert k notation to full numbers
+                        def parse_number(num):
+                            num = num.replace(',', '')
+                            if num.lower().endswith('k'):
+                                return int(float(num[:-1]) * 1000)
+                            return int(num)
+                        
+                        salary_min = parse_number(numbers[0])
+                        if len(numbers) > 1:
+                            salary_max = parse_number(numbers[1])
+                        salary_currency = '$'
+                        
+                        # Determine salary type
+                        if re.search(r'(?i)per\s*year|annual|yearly', text):
+                            salary_type = 'yearly'
+                        elif re.search(r'(?i)per\s*hour|hourly', text):
+                            salary_type = 'hourly'
+                        break
+            if salary:
                 break
 
-        # Get the content following this section header
-        content = []
-        current = section.find_next()
-        while current and current.name not in ['h1', 'h2', 'h3', 'h4', 'h5']:
-            if current.name in ['p', 'li', 'ul', 'div']:
-                content.append(current.decode_contents())
-            current = current.find_next()
+        # Employment Type
+        employment_type = "full-time"  # Default
+        employment_patterns = {
+            'full-time': r'(?i)full[- ]time|ft\b',
+            'part-time': r'(?i)part[- ]time|pt\b',
+            'contract': r'(?i)contract|contractor',
+            'temporary': r'(?i)temporary|temp\b',
+            'internship': r'(?i)internship|intern\b'
+        }
+        
+        for etype, pattern in employment_patterns.items():
+            if re.search(pattern, description) or (title_elem and re.search(pattern, title_elem.text)):
+                employment_type = etype
+                break
 
-        # Clean and process the content
-        cleaned_content = TextProcessor.clean_html('\n'.join(content))
+        # Remote Status and Work Types
+        remote = False
+        work_types = []
+        
+        # Check location and description for work type indicators
+        texts_to_check = [location, description, position]
+        for text in texts_to_check:
+            if text:
+                text_lower = text.lower()
+                if any(term in text_lower for term in ['remote', 'work from home', 'wfh']):
+                    remote = True
+                    if "remote" not in work_types:
+                        work_types.append("remote")
+                if "hybrid" in text_lower and "hybrid" not in work_types:
+                    work_types.append("hybrid")
+                if any(x in text_lower for x in ["on-site", "onsite", "in office", "in-office"]) and "on-site" not in work_types:
+                    work_types.append("on-site")
 
-        # Sort into appropriate category
-        if section_type == 'requirements':
-            requirements.extend(TextProcessor.extract_bullet_points(cleaned_content))
-        elif section_type == 'benefits':
-            benefits.extend(TextProcessor.extract_bullet_points(cleaned_content))
-        else:
-            description_parts.append(cleaned_content)
+        # Experience Level
+        experience_level = None
+        experience_patterns = [
+            (r'\b(?:senior|sr\.?\s*|lead)\b', 'senior'),
+            (r'\b(?:junior|jr\.?\s*)\b', 'junior'),
+            (r'\b(?:mid[- ]level|mid\s+senior)\b', 'mid-level'),
+            (r'\b(?:principal|staff|director)\b', 'principal'),
+            (r'\b(?:entry[- ]level|fresh\s*graduate|new\s*grad|associate)\b', 'entry-level')
+        ]
+        
+        for pattern, level in experience_patterns:
+            if re.search(pattern, position.lower()) or re.search(pattern, description.lower()):
+                experience_level = level
+                break
 
-    # Combine description parts
-    description = '\n\n'.join(description_parts)
+        # Posted Date and Expiration
+        posted_date = datetime.now().isoformat()  # Default to now if not found
+        expires_at = (datetime.now() + timedelta(days=30)).isoformat()  # Default to 30 days from now
 
-    # Enhanced salary detection
-    salary = None
-    salary_min = None
-    salary_max = None
-    salary_currency = None
-    salary_type = None
+        # Try to find actual posted date
+        for meta in head.find_all("meta"):
+            if meta.get("property") == "article:published_time":
+                posted_date = meta.get("content")
+                break
 
-    # Look for salary in specific compensation sections and description
-    salary_section = soup.find(lambda tag: tag.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'div'] and 
-                             re.search(r'(?i)compensation|salary', tag.text))
-    
-    salary_patterns = [
-        r'\$\d{2,3}(?:,\d{3})*(?:\s*-\s*\$\d{2,3}(?:,\d{3})*)?(?:\s*k)?(?:\s*per\s*year)?',
-        r'\$\d{2,3}(?:,\d{3})*(?:\s*k)?(?:\s*-\s*\$\d{2,3}(?:,\d{3})*(?:\s*k)?)?',
-        r'(?i)(\$\d{2,3}(?:,\d{3})*(?:\s*k)?)\s*(?:to|-)\s*(\$\d{2,3}(?:,\d{3})*(?:\s*k)?)',
-        r'(?i)salary range[:\s]+(\$[\d,]+k?)\s*(?:to|-)\s*(\$[\d,]+k?)'
-    ]
+        # Create job details with safe defaults
+        job_details = {
+            "title": position or "Unknown Position",
+            "company": company_name or "Unknown Company",
+            "location": location or "",
+            "description": description or "",
+            "salary": salary,
+            "remote": remote,
+            "work_types": work_types or [],
+            "employment_type": employment_type or "full-time",
+            "experience_level": experience_level,
+            "requirements": requirements or [],
+            "qualifications": qualifications or [],
+            "benefits": benefits or [],
+            "application_url": link,
+            "company_logo": company_logo,
+            "source": "greenhouse",
+            "posted_date": posted_date,
+            "expires_at": expires_at,
+            "salary_min": salary_min,
+            "salary_max": salary_max,
+            "salary_currency": salary_currency,
+            "salary_type": salary_type,
+            "scraped_at": datetime.now().isoformat(),
+            "status": "active"
+        }
 
-    salary_texts = [description]
-    if salary_section:
-        next_elem = salary_section.find_next()
-        while next_elem and next_elem.name not in ['h1', 'h2', 'h3', 'h4', 'h5']:
-            salary_texts.append(next_elem.get_text())
-            next_elem = next_elem.find_next()
-
-    for text in salary_texts:
-        if not text:
-            continue
-        for pattern in salary_patterns:
-            match = re.search(pattern, text)
-            if match:
-                salary = match.group(0)
-                # Extract numbers
-                numbers = re.findall(r'\d+(?:,\d{3})*(?:k)?', salary)
-                if numbers:
-                    # Convert k notation to full numbers
-                    def parse_number(num):
-                        num = num.replace(',', '')
-                        if num.lower().endswith('k'):
-                            return int(float(num[:-1]) * 1000)
-                        return int(num)
-                    
-                    salary_min = parse_number(numbers[0])
-                    if len(numbers) > 1:
-                        salary_max = parse_number(numbers[1])
-                    salary_currency = '$'
-                    
-                    # Determine salary type
-                    if re.search(r'(?i)per\s*year|annual|yearly', text):
-                        salary_type = 'yearly'
-                    elif re.search(r'(?i)per\s*hour|hourly', text):
-                        salary_type = 'hourly'
-                    break
-        if salary:
-            break
-
-    # Employment Type
-    employment_type = "full-time"  # Default
-    employment_patterns = {
-        'full-time': r'(?i)full[- ]time|ft\b',
-        'part-time': r'(?i)part[- ]time|pt\b',
-        'contract': r'(?i)contract|contractor',
-        'temporary': r'(?i)temporary|temp\b',
-        'internship': r'(?i)internship|intern\b'
-    }
-    
-    for etype, pattern in employment_patterns.items():
-        if re.search(pattern, description) or (title_elem and re.search(pattern, title_elem.text)):
-            employment_type = etype
-            break
-
-    # Remote Status and Work Types
-    remote = False
-    work_types = []
-    
-    # Check location and description for work type indicators
-    texts_to_check = [location, description, position]
-    for text in texts_to_check:
-        if text:
-            text_lower = text.lower()
-            if any(term in text_lower for term in ['remote', 'work from home', 'wfh']):
-                remote = True
-                if "remote" not in work_types:
-                    work_types.append("remote")
-            if "hybrid" in text_lower and "hybrid" not in work_types:
-                work_types.append("hybrid")
-            if any(x in text_lower for x in ["on-site", "onsite", "in office", "in-office"]) and "on-site" not in work_types:
-                work_types.append("on-site")
-
-    # Experience Level
-    experience_level = None
-    experience_patterns = [
-        (r'\b(?:senior|sr\.?\s*|lead)\b', 'senior'),
-        (r'\b(?:junior|jr\.?\s*)\b', 'junior'),
-        (r'\b(?:mid[- ]level|mid\s+senior)\b', 'mid-level'),
-        (r'\b(?:principal|staff|director)\b', 'principal'),
-        (r'\b(?:entry[- ]level|fresh\s*graduate|new\s*grad|associate)\b', 'entry-level')
-    ]
-    
-    for pattern, level in experience_patterns:
-        if re.search(pattern, position.lower()) or re.search(pattern, description.lower()):
-            experience_level = level
-            break
-
-    # Posted Date and Expiration
-    posted_date = datetime.now().isoformat()  # Default to now if not found
-    expires_at = (datetime.now() + timedelta(days=30)).isoformat()  # Default to 30 days from now
-
-    # Try to find actual posted date
-    for meta in head.find_all("meta"):
-        if meta.get("property") == "article:published_time":
-            posted_date = meta.get("content")
-            break
-
-    # Create job details
-    job_details = {
-        "title": position,
-        "company": company_name,
-        "location": location,
-        "description": description,
-        "salary": salary,
-        "remote": remote,
-        "work_types": work_types,
-        "employment_type": employment_type,
-        "experience_level": experience_level,
-        "requirements": requirements,
-        "qualifications": qualifications,
-        "benefits": benefits,
-        "application_url": link,
-        "company_logo": company_logo,
-        "source": "greenhouse",
-        "posted_date": posted_date,
-        "expires_at": expires_at,
-        "salary_min": salary_min,
-        "salary_max": salary_max,
-        "salary_currency": salary_currency,
-        "salary_type": salary_type,
-        "scraped_at": datetime.now().isoformat(),
-        "status": "active"
-    }
-
-    return TextProcessor.process_job_details(job_details)
+        return TextProcessor.process_job_details(job_details)
+        
+    except Exception as e:
+        logging.error(f"Error parsing Greenhouse job {link}: {str(e)}", exc_info=True)
+        return None
 
 
 def get_ashby_job_details(link: str) -> dict:
@@ -922,146 +943,186 @@ def get_ashby_job_details(link: str) -> dict:
 
 
 def get_wellfound_job_details(link: str) -> dict:
-    """Get job details from a Wellfound job posting."""
-    response = requests.get(link)
-    soup = BeautifulSoup(response.content, "html.parser")
-    
-    # Initialize job details
-    job_details = {
-        "title": "",
-        "company": "",
-        "company_logo": "",
-        "location": "",
-        "description": "",
-        "requirements": "",
-        "benefits": "",
-        "salary": "",
-        "employment_type": "",
-        "work_types": [],
-        "experience_level": "",
-        "posted_date": datetime.now().isoformat(),
-        "expiration_date": (datetime.now() + timedelta(days=30)).isoformat(),
-        "apply_url": link,
-        "source_url": link,
-    }
-    
+    """Get job details from a Wellfound job posting with improved error handling."""
     try:
-        # Extract job title
-        title_elem = soup.find("h1") or soup.find("h2", class_=lambda x: x and "title" in x.lower())
-        if title_elem:
-            job_details["title"] = title_elem.get_text().strip()
-            
-        # Extract company info
-        company_elem = soup.find("a", href=lambda x: x and "/company/" in x) or \
-                      soup.find("div", class_=lambda x: x and "company" in x.lower())
-        if company_elem:
-            job_details["company"] = company_elem.get_text().strip()
-            
-        # Extract company logo
-        logo_elem = soup.find("img", class_=lambda x: x and ("logo" in x.lower() or "company" in x.lower()))
-        if logo_elem and logo_elem.get("src"):
-            job_details["company_logo"] = logo_elem["src"]
-            
-        # Extract location
-        location_elem = soup.find("div", class_=lambda x: x and "location" in x.lower()) or \
-                       soup.find("span", class_=lambda x: x and "location" in x.lower())
-        if location_elem:
-            location = location_elem.get_text().strip()
-            job_details["location"] = location
-            
-            # Check for remote/hybrid indicators
-            location_lower = location.lower()
-            if "remote" in location_lower:
-                job_details["work_types"].append("remote")
-            if "hybrid" in location_lower:
-                job_details["work_types"].append("hybrid")
-            if not job_details["work_types"] and ("office" in location_lower or "on-site" in location_lower):
-                job_details["work_types"].append("on-site")
-                
-        # Extract salary
-        salary_elem = soup.find(string=lambda x: x and any(s in x.lower() for s in ["salary", "compensation"]))
-        if salary_elem:
-            parent = salary_elem.parent
-            salary_text = parent.get_text() if parent else salary_elem
-            # Extract salary range using regex
-            salary_match = re.search(r'\$[\d,]+(?:\s*-\s*\$[\d,]+)?(?:\s*(?:k|K|thousand|million|M))?\s*(?:per\s*(?:year|month|week|hr|hour|annum|yr))?', salary_text)
-            if salary_match:
-                job_details["salary"] = salary_match.group(0)
-                
-        # Extract employment type
-        type_elem = soup.find(string=lambda x: x and "employment type" in x.lower())
-        if type_elem:
-            parent = type_elem.parent
-            if parent:
-                type_text = parent.get_text().lower()
-                if "full" in type_text:
-                    job_details["employment_type"] = "full-time"
-                elif "part" in type_text:
-                    job_details["employment_type"] = "part-time"
-                elif "contract" in type_text:
-                    job_details["employment_type"] = "contract"
-                elif "intern" in type_text:
-                    job_details["employment_type"] = "internship"
-                    
-        # Extract experience level
-        exp_elem = soup.find(string=lambda x: x and any(e in x.lower() for e in ["experience", "level", "seniority"]))
-        if exp_elem:
-            parent = exp_elem.parent
-            if parent:
-                exp_text = parent.get_text().lower()
-                if any(level in exp_text for level in ["senior", "sr.", "lead"]):
-                    job_details["experience_level"] = "senior"
-                elif any(level in exp_text for level in ["mid", "intermediate"]):
-                    job_details["experience_level"] = "mid"
-                elif any(level in exp_text for level in ["junior", "jr.", "entry"]):
-                    job_details["experience_level"] = "junior"
-                    
-        # Extract sections
-        main_content = soup.find("div", class_=lambda x: x and any(c in x.lower() for c in ["description", "content", "details"]))
-        if main_content:
-            sections = {}
-            current_section = "description"
-            current_text = []
-            
-            for elem in main_content.children:
-                if elem.name in ["h1", "h2", "h3", "h4", "h5", "h6"]:
-                    # Save previous section
-                    if current_text:
-                        sections[current_section] = "\n".join(current_text)
-                        current_text = []
-                    
-                    # Determine new section
-                    heading = elem.get_text().lower().strip()
-                    if any(kw in heading for kw in ["requirement", "qualification", "what you'll need"]):
-                        current_section = "requirements"
-                    elif any(kw in heading for kw in ["benefit", "perks", "what we offer"]):
-                        current_section = "benefits"
-                    elif "about" in heading:
-                        current_section = "description"
-                    else:
-                        current_section = "description"
-                else:
-                    text = elem.get_text().strip()
-                    if text:
-                        current_text.append(text)
-            
-            # Save last section
-            if current_text:
-                sections[current_section] = "\n".join(current_text)
-            
-            # Assign sections to job details
-            for section, content in sections.items():
-                job_details[section] = content
-                
-        # If no sections were found, try to get all content
-        if not job_details["description"]:
-            description_elems = main_content.find_all(["p", "ul", "ol"]) if main_content else []
-            job_details["description"] = "\n".join(elem.get_text().strip() for elem in description_elems if elem.get_text().strip())
-            
-    except Exception as e:
-        logging.error(f"Error parsing Wellfound job details from {link}: {str(e)}")
+        soup = get_job_page_with_retry(link)
+        if not soup:
+            logging.warning(f"Failed to fetch Wellfound job page: {link}")
+            return None
+
+        # Initialize job details with safe defaults
+        job_details = {
+            "title": "Unknown Position",
+            "company": "Unknown Company",
+            "company_logo": None,
+            "location": "",
+            "description": "",
+            "requirements": [],
+            "benefits": [],
+            "salary": None,
+            "employment_type": "full-time",
+            "work_types": [],
+            "remote": False,
+            "experience_level": None,
+            "posted_date": datetime.now().isoformat(),
+            "expires_at": (datetime.now() + timedelta(days=30)).isoformat(),
+            "application_url": link,
+            "source": "wellfound",
+            "salary_min": None,
+            "salary_max": None,
+            "salary_currency": None,
+            "salary_type": None
+        }
         
-    return TextProcessor.process_job_details(job_details)
+        try:
+            # Extract job title
+            title_elem = soup.find("h1") or soup.find("h2", class_=lambda x: x and "title" in x.lower())
+            if title_elem:
+                job_details["title"] = title_elem.get_text().strip()
+                
+            # Extract company info
+            company_elem = soup.find("a", href=lambda x: x and "/company/" in x) or \
+                          soup.find("div", class_=lambda x: x and "company" in x.lower())
+            if company_elem:
+                job_details["company"] = company_elem.get_text().strip()
+                
+            # Extract company logo
+            logo_elem = soup.find("img", class_=lambda x: x and ("logo" in x.lower() or "company" in x.lower()))
+            if logo_elem and logo_elem.get("src"):
+                job_details["company_logo"] = logo_elem["src"]
+                
+            # Extract location and work type information
+            location_elem = soup.find("div", class_=lambda x: x and "location" in x.lower()) or \
+                           soup.find("span", class_=lambda x: x and "location" in x.lower())
+            if location_elem:
+                location = location_elem.get_text().strip()
+                job_details["location"] = location
+                
+                # Check for remote/hybrid indicators
+                location_lower = location.lower()
+                if any(term in location_lower for term in ['remote', 'work from home', 'wfh']):
+                    job_details["remote"] = True
+                    if "remote" not in job_details["work_types"]:
+                        job_details["work_types"].append("remote")
+                if "hybrid" in location_lower and "hybrid" not in job_details["work_types"]:
+                    job_details["work_types"].append("hybrid")
+                if any(x in location_lower for x in ["on-site", "onsite", "in office", "in-office"]) and "on-site" not in job_details["work_types"]:
+                    job_details["work_types"].append("on-site")
+
+            # Extract salary information
+            salary_elem = soup.find(string=lambda x: x and any(s in x.lower() for s in ["salary", "compensation"]))
+            if salary_elem:
+                parent = salary_elem.parent
+                salary_text = parent.get_text() if parent else salary_elem
+                # Extract salary range using regex
+                salary_match = re.search(r'\$[\d,]+(?:\s*-\s*\$[\d,]+)?(?:\s*(?:k|K|thousand|million|M))?\s*(?:per\s*(?:year|month|week|hr|hour|annum|yr))?', salary_text)
+                if salary_match:
+                    job_details["salary"] = salary_match.group(0)
+                    
+                    # Try to extract salary min/max
+                    numbers = re.findall(r'\d+(?:,\d{3})*(?:k)?', job_details["salary"])
+                    if numbers:
+                        def parse_number(num):
+                            num = num.replace(',', '')
+                            if num.lower().endswith('k'):
+                                return int(float(num[:-1]) * 1000)
+                            return int(num)
+                        
+                        job_details["salary_min"] = parse_number(numbers[0])
+                        if len(numbers) > 1:
+                            job_details["salary_max"] = parse_number(numbers[1])
+                        job_details["salary_currency"] = "$"
+                        
+                        if re.search(r'(?i)per\s*year|annual|yearly', salary_text):
+                            job_details["salary_type"] = "yearly"
+                        elif re.search(r'(?i)per\s*hour|hourly', salary_text):
+                            job_details["salary_type"] = "hourly"
+
+            # Extract employment type
+            type_elem = soup.find(string=lambda x: x and "employment type" in x.lower())
+            if type_elem:
+                parent = type_elem.parent
+                if parent:
+                    type_text = parent.get_text().lower()
+                    if "full" in type_text:
+                        job_details["employment_type"] = "full-time"
+                    elif "part" in type_text:
+                        job_details["employment_type"] = "part-time"
+                    elif "contract" in type_text:
+                        job_details["employment_type"] = "contract"
+                    elif "intern" in type_text:
+                        job_details["employment_type"] = "internship"
+
+            # Extract experience level
+            exp_patterns = [
+                (r'\b(?:senior|sr\.?\s*|lead)\b', 'senior'),
+                (r'\b(?:junior|jr\.?\s*)\b', 'junior'),
+                (r'\b(?:mid[- ]level|mid\s+senior)\b', 'mid-level'),
+                (r'\b(?:principal|staff|director)\b', 'principal'),
+                (r'\b(?:entry[- ]level|fresh\s*graduate|new\s*grad)\b', 'entry-level')
+            ]
+            
+            for pattern, level in exp_patterns:
+                if re.search(pattern, job_details["title"].lower()) or \
+                   (job_details.get("description") and re.search(pattern, job_details["description"].lower())):
+                    job_details["experience_level"] = level
+                    break
+
+            # Extract sections (description, requirements, benefits)
+            main_content = soup.find("div", class_=lambda x: x and any(c in x.lower() for c in ["description", "content", "details"]))
+            if main_content:
+                sections = {}
+                current_section = "description"
+                current_text = []
+                
+                for elem in main_content.children:
+                    if elem.name in ["h1", "h2", "h3", "h4", "h5", "h6"]:
+                        # Save previous section
+                        if current_text:
+                            sections[current_section] = "\n".join(current_text)
+                            current_text = []
+                        
+                        # Determine new section
+                        heading = elem.get_text().lower().strip()
+                        if any(kw in heading for kw in ["requirement", "qualification", "what you'll need"]):
+                            current_section = "requirements"
+                        elif any(kw in heading for kw in ["benefit", "perks", "what we offer"]):
+                            current_section = "benefits"
+                        elif "about" in heading:
+                            current_section = "description"
+                        else:
+                            current_section = "description"
+                    else:
+                        text = elem.get_text().strip()
+                        if text:
+                            current_text.append(text)
+                
+                # Save last section
+                if current_text:
+                    sections[current_section] = "\n".join(current_text)
+                
+                # Process sections
+                for section, content in sections.items():
+                    if section == "description":
+                        job_details["description"] = content
+                    elif section == "requirements":
+                        job_details["requirements"] = TextProcessor.extract_bullet_points(content)
+                    elif section == "benefits":
+                        job_details["benefits"] = TextProcessor.extract_bullet_points(content)
+
+            # If no sections were found, try to get all content
+            if not job_details["description"] and main_content:
+                description_elems = main_content.find_all(["p", "ul", "ol"])
+                job_details["description"] = "\n".join(elem.get_text().strip() for elem in description_elems if elem.get_text().strip())
+                
+        except Exception as e:
+            logging.warning(f"Error extracting specific field from Wellfound job {link}: {str(e)}")
+            
+        return TextProcessor.process_job_details(job_details)
+        
+    except Exception as e:
+        logging.error(f"Error parsing Wellfound job {link}: {str(e)}", exc_info=True)
+        return None
 
 
 def normalize_job_url(url: str) -> str:
@@ -1085,9 +1146,29 @@ def generate_job_hash(job_details: dict) -> str:
     return hashlib.md5(unique_string.encode()).hexdigest()
 
 
+def get_job_page_with_retry(url: str, max_retries: int = 3) -> Optional[BeautifulSoup]:
+    """Fetch and parse a job page with retry logic."""
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.content, "html.parser")
+            if not soup or not soup.find("html"):
+                raise ValueError("Invalid HTML content")
+            return soup
+        except Exception as e:
+            if attempt == max_retries - 1:
+                logging.error(f"Failed to fetch {url} after {max_retries} attempts: {str(e)}")
+                return None
+            time.sleep(1 * (attempt + 1))  # Exponential backoff
+    return None
+
+
 def handle_job_insert(supabase: any, job_urls: list[tuple[str, str]], job_site: JobSite):
-    """Handle job insertion with deduplication."""
+    """Handle job insertion with deduplication and improved error handling."""
     processed_urls = set()  # Track processed URLs
+    processed_count = 0
+    error_count = 0
     
     for desc_url, apply_url in job_urls:
         try:
@@ -1109,6 +1190,7 @@ def handle_job_insert(supabase: any, job_urls: list[tuple[str, str]], job_site: 
                 job_details = get_wellfound_job_details(desc_url)
 
             if not job_details:
+                error_count += 1
                 continue
 
             # Update URLs
@@ -1117,6 +1199,19 @@ def handle_job_insert(supabase: any, job_urls: list[tuple[str, str]], job_site: 
             # Generate unique hash for the job
             job_hash = generate_job_hash(job_details)
             
+            # Clean array fields for PostgreSQL
+            if job_details.get("requirements"):
+                job_details["requirements"] = "{" + ",".join(f'"{str(req).replace('"', '\\"')}"' for req in job_details["requirements"]) + "}"
+            
+            if job_details.get("qualifications"):
+                job_details["qualifications"] = "{" + ",".join(f'"{str(qual).replace('"', '\\"')}"' for qual in job_details["qualifications"]) + "}"
+            
+            if job_details.get("benefits"):
+                job_details["benefits"] = "{" + ",".join(f'"{str(ben).replace('"', '\\"')}"' for ben in job_details["benefits"]) + "}"
+            
+            if job_details.get("work_types"):
+                job_details["work_types"] = "{" + ",".join(job_details["work_types"]) + "}" if job_details["work_types"] else "{remote}" if job_details.get("remote") else None
+
             # Map the job details to match our Supabase schema
             supabase_job = {
                 "title": job_details["title"],
@@ -1124,36 +1219,40 @@ def handle_job_insert(supabase: any, job_urls: list[tuple[str, str]], job_site: 
                 "location": job_details["location"],
                 "description": job_details["description"],
                 "salary": job_details["salary"],
-                "remote": job_details["remote"],
-                "work_types": "{" + ",".join(job_details["work_types"]) + "}" if job_details["work_types"] else "{remote}" if job_details["remote"] else None,
-                "employment_type": job_details["employment_type"],
-                "experience_level": job_details["experience_level"],
-                "requirements": "{" + ",".join(job_details["requirements"]) + "}" if job_details["requirements"] else None,
-                "qualifications": "{" + ",".join(f'"{q}"' for q in job_details["qualifications"]) + "}" if job_details["qualifications"] else None,
-                "benefits": "{" + ",".join(f'"{b}"' for b in job_details["benefits"]) + "}" if job_details["benefits"] else None,
+                "remote": job_details.get("remote", False),
+                "work_types": job_details.get("work_types"),
+                "employment_type": job_details.get("employment_type"),
+                "experience_level": job_details.get("experience_level"),
+                "requirements": job_details.get("requirements"),
+                "qualifications": job_details.get("qualifications"),
+                "benefits": job_details.get("benefits"),
                 "application_url": job_details["application_url"],
-                "company_logo": job_details["company_logo"],
+                "company_logo": job_details.get("company_logo"),
                 "source": job_details["source"],
                 "posted_date": job_details["posted_date"],
                 "expires_at": job_details["expires_at"],
                 "scraped_at": datetime.now().isoformat(),
                 "status": "active",
-                "salary_min": job_details["salary_min"],
-                "salary_max": job_details["salary_max"],
-                "salary_currency": job_details["salary_currency"],
-                "salary_type": job_details["salary_type"],
+                "salary_min": job_details.get("salary_min"),
+                "salary_max": job_details.get("salary_max"),
+                "salary_currency": job_details.get("salary_currency"),
+                "salary_type": job_details.get("salary_type"),
                 "last_updated": datetime.now().isoformat(),
                 "job_hash": job_hash
             }
 
-            print(f"Processing job from {job_site.name}: {supabase_job['title']} at {supabase_job['company']}")
+            logging.info(f"Processing job from {job_site.name}: {supabase_job['title']} at {supabase_job['company']}")
             
             # Try to upsert the job based on job_hash
             supabase.upsert_job(supabase_job)
+            processed_count += 1
             
         except Exception as e:
-            logging.error(f"Failed to process job {desc_url}: {str(e)}")
+            error_count += 1
+            logging.error(f"Failed to process job {desc_url}: {str(e)}", exc_info=True)
             continue
+    
+    logging.info(f"Processed {processed_count} jobs with {error_count} errors for {job_site.name}")
 
 
 regex = {
