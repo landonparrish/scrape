@@ -17,7 +17,7 @@ class JobSite(Enum):
     LEVER = "lever.co"
     GREENHOUSE = "boards.greenhouse.io/*/jobs/*"
     ASHBY = "ashbyhq.com"
-    WELLFOUND = "wellfound.com"
+    WELLFOUND = "TODO"
     ANGELLIST = "TODO"
     WORKABLE = "TODO"
     INDEED = "TODO"
@@ -121,9 +121,7 @@ def find_jobs(
     # First try direct crawling if location URLs are provided
     if location_urls:
         for job_site, url in location_urls.items():
-            if job_site == JobSite.WELLFOUND:
-                job_urls_by_board[job_site] = crawl_wellfound_jobs(url)
-            elif job_site == JobSite.LEVER:
+            if job_site == JobSite.LEVER:
                 job_urls_by_board[job_site] = crawl_lever_jobs(url)
             elif job_site == JobSite.GREENHOUSE:
                 job_urls_by_board[job_site] = crawl_greenhouse_jobs(url)
@@ -754,22 +752,38 @@ def get_ashby_job_details(link: str) -> dict:
                 if any(x in text_lower for x in ["on-site", "onsite", "in office", "in-office"]) and "on-site" not in work_types:
                     work_types.append("on-site")
 
-        return {
+        # Create job details with all required fields
+        job_details = {
             "title": position,
             "company": company_name,
             "location": location,
             "description": description,
             "requirements": requirements,
+            "qualifications": [],  # Empty list as Ashby doesn't separate qualifications
             "benefits": benefits,
             "company_logo": company_logo,
             "remote": remote,
             "work_types": work_types,
-            "employment_type": "full-time"  # Default
+            "employment_type": "full-time",  # Default
+            "experience_level": None,  # Will be determined by text processor
+            "salary": None,  # Ashby rarely shows salary
+            "salary_min": None,
+            "salary_max": None,
+            "salary_currency": None,
+            "salary_type": None,
+            "application_url": link,
+            "source": "ashby",
+            "posted_date": datetime.now().isoformat(),
+            "expires_at": (datetime.now() + timedelta(days=30)).isoformat(),
+            "scraped_at": datetime.now().isoformat(),
+            "status": "active"
         }
+            
+        return TextProcessor.process_job_details(job_details)
             
     except Exception as e:
         logging.error(f"Error parsing Ashby job details from {link}: {str(e)}")
-        return {}
+        return None
 
 
 def get_wellfound_job_details(link: str) -> dict:
@@ -1045,8 +1059,6 @@ def handle_job_insert(supabase: any, job_urls: list[tuple[str, str]], job_site: 
                 job_details = get_greenhouse_job_details(desc_url)
             elif job_site == JobSite.ASHBY:
                 job_details = get_ashby_job_details(desc_url)
-            elif job_site == JobSite.WELLFOUND:
-                job_details = get_wellfound_job_details(desc_url)
 
             if not job_details:
                 error_count += 1
@@ -1118,7 +1130,7 @@ regex = {
     JobSite.LEVER: r"https://jobs.lever.co/[^/]+/[^/]+(?:/apply)?",
     JobSite.GREENHOUSE: r"https?://(?:job-boards\.|boards\.)?greenhouse\.io/[^/]+/jobs/\d+(?:[#?][^/]*)?",
     JobSite.ASHBY: r"https?://jobs\.ashbyhq\.com/[^/]+/[a-f0-9-]+(?:/application)?",
-    JobSite.WELLFOUND: r"https?://(?:www\.)?wellfound\.com/(?:jobs?|role)/[^/]+(?:/[^/]+)?(?:/apply)?",
+    JobSite.WELLFOUND: "TODO",
     JobSite.ANGELLIST: "TODO",
     JobSite.WORKABLE: "TODO",
     JobSite.INDEED: "TODO",
