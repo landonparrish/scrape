@@ -1,8 +1,23 @@
 from bs4 import BeautifulSoup
 import re
 from typing import List, Optional, Dict
+from utils.llm_processor import LLMProcessor
+import logging
 
 class TextProcessor:
+    _llm_processor = None
+
+    @classmethod
+    def get_llm_processor(cls) -> Optional[LLMProcessor]:
+        """Get or create LLM processor instance."""
+        if cls._llm_processor is None:
+            try:
+                cls._llm_processor = LLMProcessor()
+            except Exception as e:
+                logging.error(f"Failed to initialize LLM processor: {str(e)}")
+                return None
+        return cls._llm_processor
+
     # Enhanced section identifiers for better content detection
     SECTION_IDENTIFIERS = {
         'summary': [
@@ -298,24 +313,59 @@ class TextProcessor:
             
         return ' '.join(summary)
 
+    @classmethod
+    def process_job_details(cls, job_details: Dict) -> Dict:
+        """Process job details with LLM if available, fallback to traditional processing."""
+        # Try LLM processing first
+        llm = cls.get_llm_processor()
+        if llm:
+            try:
+                processed = llm.process_job_details(job_details)
+                if processed:
+                    # Clean requirements and qualifications
+                    if processed.get("requirements"):
+                        processed["requirements"] = llm.clean_requirements(processed["requirements"])
+                    if processed.get("qualifications"):
+                        processed["qualifications"] = llm.clean_requirements(processed["qualifications"])
+                    # Extract experience level if not set
+                    if not processed.get("experience_level") and processed.get("title"):
+                        processed["experience_level"] = llm.extract_experience_level(
+                            processed["title"],
+                            processed.get("description", "")
+                        )
+                    return processed
+            except Exception as e:
+                logging.error(f"LLM processing failed, falling back to traditional: {str(e)}")
+
+        # Fallback to traditional processing
+        return cls._traditional_process_job_details(job_details)
+
     @staticmethod
-    def process_job_details(job_details: dict) -> dict:
-        """Enhanced job details processing with better section handling and summarization."""
+    def _traditional_process_job_details(job_details: Dict) -> Dict:
+        """Traditional rule-based processing as fallback."""
         processed = {}
         
         for field, content in job_details.items():
             if isinstance(content, str):
                 if field == 'description':
-                    # Summarize the description
                     processed[field] = TextProcessor.summarize_text(content)
                 else:
                     processed[field] = TextProcessor.process_job_field(field, content)
             elif isinstance(content, list):
                 if field in ['requirements', 'qualifications', 'benefits']:
-                    # Clean and normalize list items
+                    # Try LLM cleaning first
+                    if llm:
+                        try:
+                            cleaned_items = llm.clean_requirements(content)
+                            if cleaned_items:
+                                processed[field] = cleaned_items
+                                continue
+                        except Exception as e:
+                            logging.error(f"LLM cleaning failed for {field}: {str(e)}")
+                    
+                    # Fall back to traditional cleaning
                     cleaned_items = []
                     for item in content:
-                        # Remove duplicates and near-duplicates
                         item = TextProcessor.clean_html(item)
                         if item and not any(
                             existing.lower() in item.lower() or item.lower() in existing.lower()
