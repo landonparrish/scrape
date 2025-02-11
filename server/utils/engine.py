@@ -934,7 +934,7 @@ def normalize_job_url(url: str) -> str:
 def generate_job_hash(job_details: dict) -> str:
     """Generate a unique hash for a job based on key fields."""
     # Create a string combining key fields that should make a job unique
-    unique_string = f"{job_details['company']}:{job_details['title']}:{job_details['location']}:{normalize_job_url(job_details['source_url'])}"
+    unique_string = f"{job_details['company']}:{job_details['title']}:{job_details['location']}:{normalize_job_url(job_details['application_url'])}"
     # Create a hash of the string
     return hashlib.md5(unique_string.encode()).hexdigest()
 
