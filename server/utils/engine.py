@@ -42,8 +42,8 @@ def crawl_wellfound_jobs(location_url: str) -> list[str]:
     while True:
         try:
             # Add page parameter if not first page
-            url = location_url if page == 1 else f"{location_url}?page={page}"
-            logging.info(f"Crawling Wellfound page {page}: {url}")
+            url = location_url if page == 1 else "{}?page={}".format(location_url, page)
+            logging.info("Crawling Wellfound page {}: {}".format(page, url))
             
             response = requests.get(url, headers={
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
@@ -60,7 +60,7 @@ def crawl_wellfound_jobs(location_url: str) -> list[str]:
             job_links.extend(soup.find_all("a", href=lambda x: x and "/role/" in x))
             
             if not job_links:
-                logging.info(f"No job links found on page {page}")
+                logging.info("No job links found on page {}".format(page))
                 break
                 
             # Extract and normalize URLs
@@ -86,7 +86,7 @@ def crawl_wellfound_jobs(location_url: str) -> list[str]:
             )
             
             if not next_button or "disabled" in str(next_button.get("class", [])):
-                logging.info(f"No more pages found after page {page}")
+                logging.info("No more pages found after page {}".format(page))
                 break
                 
             page += 1
@@ -95,12 +95,12 @@ def crawl_wellfound_jobs(location_url: str) -> list[str]:
                 break
             
         except Exception as e:
-            logging.error(f"Error crawling Wellfound page {page}: {str(e)}")
+            logging.error("Error crawling Wellfound page {}: {}".format(page, str(e)))
             break
     
     # Clean and deduplicate URLs
     cleaned_urls = list(set(job_urls))
-    logging.info(f"Found {len(cleaned_urls)} unique Wellfound job URLs")
+    logging.info("Found {} unique Wellfound job URLs".format(len(cleaned_urls)))
     return cleaned_urls
 
 
@@ -194,7 +194,7 @@ def crawl_lever_jobs(base_url: str) -> list[str]:
             job_urls.append(link["href"])
             
     except Exception as e:
-        logging.error(f"Error crawling Lever jobs from {base_url}: {str(e)}")
+        logging.error("Error crawling Lever jobs from {}: {}".format(base_url, str(e)))
     
     return list(set(job_urls))
 
@@ -210,11 +210,11 @@ def crawl_greenhouse_jobs(base_url: str) -> list[str]:
         for link in soup.find_all("a", href=re.compile(r"/jobs/\d+")):
             href = link["href"]
             if not href.startswith("http"):
-                href = f"https://boards.greenhouse.io{href}"
+                href = "https://boards.greenhouse.io{}".format(href)
             job_urls.append(href)
             
     except Exception as e:
-        logging.error(f"Error crawling Greenhouse jobs from {base_url}: {str(e)}")
+        logging.error("Error crawling Greenhouse jobs from {}: {}".format(base_url, str(e)))
     
     return list(set(job_urls))
 
@@ -231,7 +231,7 @@ def crawl_ashby_jobs(base_url: str) -> list[str]:
             job_urls.append(link["href"])
             
     except Exception as e:
-        logging.error(f"Error crawling Ashby jobs from {base_url}: {str(e)}")
+        logging.error("Error crawling Ashby jobs from {}: {}".format(base_url, str(e)))
     
     return list(set(job_urls))
 
@@ -831,12 +831,12 @@ def get_ashby_job_details(link: str) -> dict:
                 text_lower = text.lower()
                 if any(term in text_lower for term in ['remote', 'work from home', 'wfh']):
                     remote = True
-                    if "remote" not in work_types:
-                        work_types.append("remote")
-                if "hybrid" in text_lower and "hybrid" not in work_types:
-                    work_types.append("hybrid")
-                if any(x in text_lower for x in ["on-site", "onsite", "in office", "in-office"]) and "on-site" not in work_types:
-                    work_types.append("on-site")
+                    if "remote" not in worktypes:
+                        worktypes.append("remote")
+                if "hybrid" in text_lower and "hybrid" not in worktypes:
+                    worktypes.append("hybrid")
+                if any(x in text_lower for x in ["on-site", "onsite", "in office", "in-office"]) and "on-site" not in worktypes:
+                    worktypes.append("on-site")
 
         # Salary detection
         salary = None
@@ -875,8 +875,8 @@ def get_ashby_job_details(link: str) -> dict:
                         elif 'per hour' in text.lower() or 'hourly' in text.lower():
                             salary_type = 'hourly'
                         break
-            if salary:
-                break
+                if salary:
+                    break
 
         # Experience Level
         experience_level = None
@@ -916,7 +916,7 @@ def get_ashby_job_details(link: str) -> dict:
             "description": description,
             "salary": salary,
             "remote": remote,
-            "work_types": work_types,
+            "work_types": worktypes,
             "employment_type": employment_type,
             "experience_level": experience_level,
             "requirements": requirements,
@@ -1140,7 +1140,12 @@ def normalize_job_url(url: str) -> str:
 def generate_job_hash(job_details: dict) -> str:
     """Generate a unique hash for a job based on key fields."""
     # Create a string combining key fields that should make a job unique
-    unique_string = f"{job_details['company']}:{job_details['title']}:{job_details['location']}:{normalize_job_url(job_details['application_url'])}"
+    unique_string = "{}:{}:{}:{}".format(
+        job_details['company'],
+        job_details['title'],
+        job_details['location'],
+        normalize_job_url(job_details['application_url'])
+    )
     # Create a hash of the string
     return hashlib.md5(unique_string.encode()).hexdigest()
 
@@ -1157,7 +1162,7 @@ def get_job_page_with_retry(url: str, max_retries: int = 3) -> Optional[Beautifu
             return soup
         except Exception as e:
             if attempt == max_retries - 1:
-                logging.error(f"Failed to fetch {url} after {max_retries} attempts: {str(e)}")
+                logging.error("Failed to fetch {} after {} attempts: {}".format(url, max_retries, str(e)))
                 return None
             time.sleep(1 * (attempt + 1))  # Exponential backoff
     return None
@@ -1200,13 +1205,13 @@ def handle_job_insert(supabase: any, job_urls: list[tuple[str, str]], job_site: 
             
             # Clean array fields for PostgreSQL
             if job_details.get("requirements"):
-                job_details["requirements"] = "{" + ",".join(f'"{str(req).replace('"', '\\"')}"' for req in job_details["requirements"]) + "}"
+                job_details["requirements"] = "{" + ",".join('"' + str(req).replace('"', '\\"') + '"' for req in job_details["requirements"]) + "}"
             
             if job_details.get("qualifications"):
-                job_details["qualifications"] = "{" + ",".join(f'"{str(qual).replace('"', '\\"')}"' for qual in job_details["qualifications"]) + "}"
+                job_details["qualifications"] = "{" + ",".join('"' + str(qual).replace('"', '\\"') + '"' for qual in job_details["qualifications"]) + "}"
             
             if job_details.get("benefits"):
-                job_details["benefits"] = "{" + ",".join(f'"{str(ben).replace('"', '\\"')}"' for ben in job_details["benefits"]) + "}"
+                job_details["benefits"] = "{" + ",".join('"' + str(ben).replace('"', '\\"') + '"' for ben in job_details["benefits"]) + "}"
             
             if job_details.get("work_types"):
                 job_details["work_types"] = "{" + ",".join(job_details["work_types"]) + "}" if job_details["work_types"] else "{remote}" if job_details.get("remote") else None
