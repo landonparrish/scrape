@@ -265,8 +265,8 @@ def get_lever_job_details(link: str) -> dict:
         # First try to get main content
         main_content = soup.find("div", {"class": "content"}) or soup.find("div", {"class": "description"})
         if main_content:
-            description = main_content.decode_contents()
-            description_parts.append(TextProcessor.clean_html(description))
+            main_description = main_content.decode_contents()
+            description_parts.append(TextProcessor.clean_html(main_description))
 
         # Process each section
         for section in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5']):
