@@ -4,7 +4,7 @@ import logging
 from typing import Dict, List, Optional
 import requests
 from datetime import datetime
-from utils.text_processor import TextProcessor
+from utils.llm_text_processor import LLMTextProcessor
 
 class LLMProcessor:
     def __init__(self):
@@ -13,7 +13,7 @@ class LLMProcessor:
             raise ValueError("DEEPSEEK_API_KEY environment variable not set")
         self.api_url = "https://api.deepseek.com/v1/chat/completions"
         self.model = "deepseek-chat"
-        self.text_processor = TextProcessor()
+        self.text_processor = LLMTextProcessor()
 
     def _call_api(self, messages: List[Dict[str, str]], temperature: float = 0.3) -> Optional[str]:
         """Call DeepSeek API with retry logic."""

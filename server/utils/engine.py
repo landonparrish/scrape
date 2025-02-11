@@ -151,14 +151,19 @@ def find_jobs(
                 
                 for time_range in time_ranges:
                     try:
-                        client = yagooglesearch.SearchClient(
-                            query=search_query,
-                            tbs=time_range.value,
-                            max_search_result_urls_to_return=max_results // len(time_ranges),
-                            verbosity=0,
-                            http_proxy=proxy,
-                            https_proxy=proxy
-                        )
+                        client_args = {
+                            "query": search_query,
+                            "tbs": time_range.value,
+                            "max_search_result_urls_to_return": max_results // len(time_ranges),
+                            "verbosity": 0
+                        }
+                        
+                        # Only add proxy if one is provided
+                        if proxy:
+                            client_args["http_proxy"] = proxy
+                            client_args["https_proxy"] = proxy
+                            
+                        client = yagooglesearch.SearchClient(**client_args)
                         client.assign_random_user_agent()
                         results = client.search()
                         all_results.extend(results)
