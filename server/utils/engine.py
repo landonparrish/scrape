@@ -220,18 +220,53 @@ class ProxyRotator:
         self.proxies = [None]  # Start with direct connection
         self.current_proxy_index = 0
         self.requests_with_current_proxy = 0
-        self.max_requests_per_proxy = 25  # Rotate after this many requests
+        self.max_requests_per_proxy = 15  # Reduced from 25 to be more conservative
         self.proxy_failures = {}  # Track failures per proxy
-        self.max_failures = 3  # Max failures before blacklisting a proxy
+        self.max_failures = 2  # Reduced from 3 to be more aggressive about removing bad proxies
         self.last_rotation_time = time.time()
-        self.min_rotation_interval = 60  # Minimum seconds between rotations
+        self.min_rotation_interval = 30  # Reduced from 60 to rotate more frequently
+        self.initialize()  # Initialize proxies immediately
         
     def initialize(self):
         """Initialize or refresh proxy list."""
-        new_proxies = get_free_proxies()
-        if new_proxies:
-            self.proxies = [None] + new_proxies  # Always keep direct connection as an option
-            self.proxy_failures = {proxy: 0 for proxy in self.proxies}
+        try:
+            new_proxies = get_free_proxies()
+            if new_proxies:
+                # Test each proxy before adding it to the pool
+                working_proxies = []
+                for proxy in new_proxies:
+                    if self._test_proxy(proxy):
+                        working_proxies.append(proxy)
+                        
+                if working_proxies:
+                    self.proxies = [None] + working_proxies  # Always keep direct connection as an option
+                    self.proxy_failures = {proxy: 0 for proxy in self.proxies}
+                    logging.info(f"Initialized proxy pool with {len(working_proxies)} working proxies")
+                else:
+                    logging.warning("No working proxies found, using direct connection")
+                    self.proxies = [None]
+                    self.proxy_failures = {None: 0}
+        except Exception as e:
+            logging.error(f"Error initializing proxies: {str(e)}")
+            self.proxies = [None]
+            self.proxy_failures = {None: 0}
+    
+    def _test_proxy(self, proxy, test_url="https://www.google.com"):
+        """Test if a proxy is working."""
+        try:
+            proxies = {
+                'http': proxy,
+                'https': proxy
+            }
+            response = requests.get(
+                test_url,
+                proxies=proxies,
+                timeout=5,
+                headers={'User-Agent': 'Mozilla/5.0'}
+            )
+            return response.status_code == 200
+        except:
+            return False
     
     def get_current_proxy(self):
         """Get current proxy configuration."""
@@ -249,8 +284,8 @@ class ProxyRotator:
     
     def should_rotate(self, status_code=None):
         """Determine if we should rotate to next proxy."""
-        # Always rotate on rate limit or forbidden
-        if status_code in [429, 403]:
+        # Always rotate on rate limit, forbidden, or proxy errors
+        if status_code in [429, 403, 407, 502, 503, 504]:
             return True
             
         # Rotate if we've used this proxy too much
@@ -272,10 +307,18 @@ class ProxyRotator:
         current_proxy = self.proxies[self.current_proxy_index]
         self.proxy_failures[current_proxy] = self.proxy_failures.get(current_proxy, 0) + 1
         
-        # If error indicates blocking/rate limiting, force rotation
+        # Force rotation on connection errors or if proxy is failing too much
         if isinstance(error, requests.exceptions.RequestException):
-            if any(term in str(error).lower() for term in ['timeout', 'blocked', 'forbidden', 'rate', 'too many']):
+            error_str = str(error).lower()
+            if any(term in error_str for term in [
+                'timeout', 'blocked', 'forbidden', 'rate', 
+                'connection refused', 'connection error', 'proxy error'
+            ]):
                 self.rotate_proxy()
+                
+        # If this proxy has failed too many times, force rotation
+        if self.proxy_failures[current_proxy] >= self.max_failures:
+            self.rotate_proxy()
     
     def rotate_proxy(self):
         """Rotate to next available proxy."""
@@ -286,8 +329,14 @@ class ProxyRotator:
         if len(self.proxies) < 3:
             self.initialize()
         
-        # Move to next proxy
-        self.current_proxy_index = (self.current_proxy_index + 1) % len(self.proxies)
+        # If we still have no proxies, use direct connection
+        if not self.proxies:
+            self.proxies = [None]
+            self.current_proxy_index = 0
+        else:
+            # Move to next proxy
+            self.current_proxy_index = (self.current_proxy_index + 1) % len(self.proxies)
+            
         self.requests_with_current_proxy = 0
         self.last_rotation_time = time.time()
         
@@ -744,7 +793,7 @@ def get_greenhouse_job_details(link: str) -> dict:
     work_types = []
     
     # Check location and description for work type indicators
-    texts_to_check = [location, description, position]
+    texts_to_check = [location, description]
     for text in texts_to_check:
         if text:
             text_lower = text.lower()
