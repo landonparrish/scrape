@@ -115,31 +115,52 @@ class ProxyFetcher:
         from urllib.parse import urlparse
         domain = urlparse(url).netloc
         
+        # Enhanced headers with more browser-like behavior
         headers = {
             'User-Agent': random.choice(self.user_agents),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
             'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
+            'TE': 'trailers'
         }
         
         # Add domain-specific headers
         if 'lever.co' in domain:
-            headers['Origin'] = 'https://jobs.lever.co'
-            headers['Referer'] = 'https://jobs.lever.co/'
+            headers.update({
+                'Origin': 'https://jobs.lever.co',
+                'Referer': 'https://jobs.lever.co/',
+                'Host': 'jobs.lever.co'
+            })
         elif 'greenhouse.io' in domain:
-            headers['Origin'] = 'https://boards.greenhouse.io'
-            headers['Referer'] = 'https://boards.greenhouse.io/'
+            headers.update({
+                'Origin': 'https://boards.greenhouse.io',
+                'Referer': 'https://boards.greenhouse.io/',
+                'Host': 'boards.greenhouse.io'
+            })
         
-        config = {'headers': headers}
+        config = {
+            'headers': headers,
+            'verify': False,  # Allow unverified HTTPS
+            'allow_redirects': True,
+            'timeout': 30
+        }
         
         if self.should_use_proxy(url):
             proxies = self.get_proxies()
             if proxies:
                 proxy = random.choice(proxies)
+                if not proxy.startswith(('http://', 'https://')):
+                    proxy = f'http://{proxy}'
                 config['proxies'] = {
-                    'http': f'http://{proxy}',
-                    'https': f'http://{proxy}'
+                    'http': proxy,
+                    'https': proxy
                 }
                 logging.info(f"Using proxy for {domain}: {proxy}")
         
@@ -150,24 +171,58 @@ class ProxyFetcher:
 
     def _test_proxy(self, proxy: str, timeout: int = 5) -> bool:
         """Test if a proxy is working by trying to connect to a test URL."""
-        proxies = {
-            'http': f'http://{proxy}',
-            'https': f'http://{proxy}'
-        }
-        
-        headers = {'User-Agent': self._get_random_user_agent()}
-        
-        # Just test with one reliable URL instead of multiple
-        url = 'http://example.com'  # Fastest and most reliable test URL
         try:
-            response = requests.get(
-                url,
-                proxies=proxies,
-                headers=headers,
-                timeout=timeout,
-                verify=False
-            )
-            return response.status_code == 200
+            # Format proxy correctly
+            if not proxy.startswith(('http://', 'https://')):
+                proxy = f'http://{proxy}'
+
+            proxies = {
+                'http': proxy,
+                'https': proxy
+            }
+            
+            headers = {
+                'User-Agent': self._get_random_user_agent(),
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1'
+            }
+            
+            # Test multiple URLs to ensure proxy works with different sites
+            test_urls = [
+                'http://example.com',
+                'https://httpbin.org/ip',
+                'https://api.ipify.org?format=json'
+            ]
+            
+            for url in test_urls:
+                try:
+                    response = requests.get(
+                        url,
+                        proxies=proxies,
+                        headers=headers,
+                        timeout=timeout,
+                        verify=False
+                    )
+                    
+                    if response.status_code == 200:
+                        # Additional validation for IP check services
+                        if 'ipify.org' in url or 'httpbin.org' in url:
+                            try:
+                                ip_data = response.json()
+                                if ip_data.get('ip') or ip_data.get('origin'):
+                                    return True
+                            except:
+                                continue
+                        else:
+                            return True
+                except:
+                    continue
+                    
+            return False
+            
         except Exception as e:
             logging.debug(f"Proxy {proxy} failed: {str(e)}")
             return False
@@ -179,74 +234,71 @@ class ProxyFetcher:
         # Return cached proxies if they're still fresh and we have enough
         if not force_refresh and len(self.cached_proxies) >= min_proxies and \
            (current_time - self.last_fetch_time) < self.min_fetch_interval:
-            logging.info(f"Using {len(self.cached_proxies)} cached proxies")
             return self.cached_proxies
 
-        url = "https://free-proxy-list.net/"
-        headers = {'User-Agent': self._get_random_user_agent()}
         proxies = []
-
-        try:
-            response = requests.get(url, headers=headers, timeout=10)
-            soup = BeautifulSoup(response.content, "html.parser")
-            table = soup.find("table", attrs={"class": "table table-striped table-bordered"})
-            
-            if not table:
-                logging.error("Could not find proxy table on the website")
-                return self.cached_proxies if self.cached_proxies else []
-
-            rows = table.find_all("tr")[1:]  # Skip header row
-            
-            for row in rows:
-                cols = row.find_all("td")
-                if len(cols) >= 8:
-                    ip = cols[0].text.strip()
-                    port = cols[1].text.strip()
-                    anonymity = cols[4].text.strip()
-                    google = cols[5].text.strip().lower() == 'yes'
-                    last_checked = cols[7].text.strip()
+        
+        # Try multiple proxy sources
+        proxy_sources = [
+            "https://free-proxy-list.net/",
+            "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+            "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt"
+        ]
+        
+        headers = {'User-Agent': self._get_random_user_agent()}
+        
+        for source in proxy_sources:
+            try:
+                response = requests.get(source, headers=headers, timeout=10)
+                
+                if source.endswith('.txt'):
+                    # Parse plain text proxy list
+                    for line in response.text.splitlines():
+                        if ':' in line:
+                            proxies.append(line.strip())
+                else:
+                    # Parse HTML table
+                    soup = BeautifulSoup(response.content, "html.parser")
+                    table = soup.find("table", attrs={"class": "table table-striped table-bordered"})
                     
-                    # More lenient filtering
-                    if 'mins ago' in last_checked:
-                        mins = int(''.join(filter(str.isdigit, last_checked)))
-                        if mins > 15:  # Increased from 5 to 15 minutes
-                            continue
-                    
-                    # Accept all proxy types that work with Google
-                    if not google:
-                        continue
-                    
-                    proxy = f"{ip}:{port}"
-                    proxies.append(proxy)
+                    if table:
+                        rows = table.find_all("tr")[1:]
+                        for row in rows:
+                            cols = row.find_all("td")
+                            if len(cols) >= 8:
+                                ip = cols[0].text.strip()
+                                port = cols[1].text.strip()
+                                https = cols[6].text.strip()
+                                google = cols[5].text.strip()
+                                
+                                if https.lower() == 'yes' and google.lower() == 'yes':
+                                    proxies.append(f"{ip}:{port}")
+                
+            except Exception as e:
+                logging.warning(f"Failed to fetch proxies from {source}: {str(e)}")
+                continue
 
-            # Shuffle all proxies
-            random.shuffle(proxies)
+        # Shuffle and test proxies
+        random.shuffle(proxies)
+        working_proxies = []
+        max_to_test = min(50, len(proxies))  # Test more proxies
+        
+        logging.info(f"Testing {max_to_test} proxies...")
+        
+        for proxy in proxies[:max_to_test]:
+            if self._test_proxy(proxy):
+                working_proxies.append(proxy)
+                logging.info(f"Found working proxy: {proxy}")
+                
+                if len(working_proxies) >= min_proxies:
+                    break
 
-            # Test proxies with a limit
-            working_proxies = []
-            max_to_test = min(20, len(proxies))  # Test at most 20 proxies
-            logging.info(f"Testing up to {max_to_test} proxies...")
-            
-            for proxy in proxies[:max_to_test]:
-                if self._test_proxy(proxy):
-                    working_proxies.append(proxy)
-                    logging.info(f"Found working proxy: {proxy}")
-                    
-                    if len(working_proxies) >= min_proxies:
-                        break
-
-            if working_proxies:
-                self.cached_proxies = working_proxies
-                self.last_fetch_time = current_time
-                logging.info(f"Successfully found {len(working_proxies)} working proxies")
-                return working_proxies
-            else:
-                logging.warning("No working proxies found, falling back to cached proxies")
-                return self.cached_proxies if self.cached_proxies else []
-
-        except Exception as e:
-            logging.error(f"Error fetching proxies: {str(e)}")
-            return self.cached_proxies if self.cached_proxies else []
+        if working_proxies:
+            self.cached_proxies = working_proxies
+            self.last_fetch_time = current_time
+            return working_proxies
+        
+        return self.cached_proxies if self.cached_proxies else []
 
 
 # Create a global instance

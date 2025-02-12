@@ -132,79 +132,79 @@ def find_jobs(
     # Then do Google search for remaining job sites
     remaining_sites = [site for site in job_sites if site not in job_urls_by_board]
     if remaining_sites:
-        proxies = [None] + get_free_proxies()  # Keep this for yagooglesearch compatibility
-        proxy_index = 0
-        success = False
-        result = []
-
-        while not success and proxy_index < len(proxies):
-            try:
-                proxy = proxies[proxy_index]
-                proxy_index += 1
-
-                search_sites = " OR ".join([f"site:{site.value}" for site in remaining_sites])
-                search_query = f"{keyword} {search_sites}"
-                logging.info(f"Searching for {search_query} using proxy {proxy}")
-                
-                # Split into multiple searches with different time ranges to get more results
-                time_ranges = [TBS.PAST_TWELVE_HOURS, TBS.PAST_DAY, TBS.PAST_WEEK] if not tbs else [tbs]
-                all_results = []
-                
-                for time_range in time_ranges:
-                    try:
-                        # Set proxy environment variables if proxy is provided
-                        original_http_proxy = os.environ.get('HTTP_PROXY')
-                        original_https_proxy = os.environ.get('HTTPS_PROXY')
-                        
-                        if proxy:
-                            os.environ['HTTP_PROXY'] = proxy
-                            os.environ['HTTPS_PROXY'] = proxy
-                        
-                        client_args = {
-                            "query": search_query,
-                            "tbs": time_range.value,
-                            "max_search_result_urls_to_return": max_results // len(time_ranges),
-                            "verbosity": 0
-                        }
-                        
-                        client = yagooglesearch.SearchClient(**client_args)
-                        client.assign_random_user_agent()
-                        results = client.search()
-                        all_results.extend(results)
-                        
-                        # Restore original proxy settings
-                        if proxy:
-                            if original_http_proxy:
-                                os.environ['HTTP_PROXY'] = original_http_proxy
-                            else:
-                                del os.environ['HTTP_PROXY']
-                            if original_https_proxy:
-                                os.environ['HTTPS_PROXY'] = original_https_proxy
-                            else:
-                                del os.environ['HTTPS_PROXY']
-                        
-                        # Add a small delay between searches
-                        time.sleep(random.uniform(2, 5))
-                    except Exception as e:
-                        logging.error(f"Error searching with time range {time_range}: {str(e)}")
-                        # Restore proxy settings even if there's an error
-                        if proxy:
-                            if original_http_proxy:
-                                os.environ['HTTP_PROXY'] = original_http_proxy
-                            else:
-                                del os.environ['HTTP_PROXY']
-                            if original_https_proxy:
-                                os.environ['HTTPS_PROXY'] = original_https_proxy
-                            else:
-                                del os.environ['HTTPS_PROXY']
+        search_sites = " OR ".join([f"site:{site.value}" for site in remaining_sites])
+        search_query = f"{keyword} {search_sites}"
+        logging.info(f"Searching for {search_query}")
+        
+        # Split into multiple searches with different time ranges to get more results
+        time_ranges = [TBS.PAST_TWELVE_HOURS, TBS.PAST_DAY, TBS.PAST_WEEK] if not tbs else [tbs]
+        all_results = []
+        
+        max_retries = 3
+        retry_delay = 5
+        
+        for time_range in time_ranges:
+            for attempt in range(max_retries):
+                try:
+                    # Configure search client with proper settings
+                    client_args = {
+                        "query": search_query,
+                        "tbs": time_range.value,
+                        "max_search_result_urls_to_return": max_results // len(time_ranges),
+                        "verbosity": 0,
+                        "verify_ssl": False,  # Handle SSL verification in our request config
+                    }
+                    
+                    client = yagooglesearch.SearchClient(**client_args)
+                    client.assign_random_user_agent()
+                    
+                    # Get request configuration from our proxy manager
+                    config = get_request_config("https://www.google.com")
+                    
+                    # Set proxy if provided in config
+                    if config.get('proxies'):
+                        os.environ['HTTP_PROXY'] = config['proxies']['http']
+                        os.environ['HTTPS_PROXY'] = config['proxies']['https']
+                    
+                    # Perform search
+                    results = client.search()
+                    all_results.extend(results)
+                    
+                    # Clear proxy environment variables
+                    if 'HTTP_PROXY' in os.environ:
+                        del os.environ['HTTP_PROXY']
+                    if 'HTTPS_PROXY' in os.environ:
+                        del os.environ['HTTPS_PROXY']
+                    
+                    # Mark successful request
+                    mark_request_result("https://www.google.com", success=True)
+                    
+                    # Add a random delay between searches
+                    time.sleep(random.uniform(2, 5))
+                    break  # Success, exit retry loop
+                    
+                except Exception as e:
+                    error_msg = str(e)
+                    logging.error(f"Error searching with time range {time_range}: {error_msg}")
+                    
+                    # Mark failed request
+                    mark_request_result("https://www.google.com", success=False)
+                    
+                    if attempt < max_retries - 1:
+                        # Calculate exponential backoff delay
+                        delay = retry_delay * (2 ** attempt) + random.uniform(0, 1)
+                        logging.info(f"Retrying in {delay:.2f} seconds...")
+                        time.sleep(delay)
                         continue
-                
-                result = list(set(all_results))  # Remove duplicates
-                success = bool(result)
-            except Exception as e:
-                logging.error(f"Error using proxy {proxy}: {str(e)}")
-                continue
-
+                    
+                    # Clear proxy environment variables on failure
+                    if 'HTTP_PROXY' in os.environ:
+                        del os.environ['HTTP_PROXY']
+                    if 'HTTPS_PROXY' in os.environ:
+                        del os.environ['HTTPS_PROXY']
+            
+        # Process results for each job site
+        result = list(set(all_results))  # Remove duplicates
         for job_site in remaining_sites:
             job_urls_for_job_site = [
                 url for url in result if re.search(regex[job_site], url)
@@ -1314,117 +1314,3 @@ def handle_job_insert(supabase: any, job_urls: list[tuple[str, str]], job_site: 
                 "last_updated": datetime.now().isoformat(),
                 "job_hash": job_hash
             }
-
-            logging.info(f"Processing job from {job_site.name}: {supabase_job['title']} at {supabase_job['company']}")
-            
-            # Try to upsert the job based on job_hash
-            supabase.upsert_job(supabase_job)
-            processed_count += 1
-            
-        except Exception as e:
-            error_count += 1
-            logging.error(f"Failed to process job {desc_url}: {str(e)}", exc_info=True)
-            continue
-    
-    logging.info(f"Processed {processed_count} jobs with {error_count} errors for {job_site.name}")
-
-
-regex = {
-    JobSite.LEVER: r"https://jobs.lever.co/[^/]+/[^/]+(?:/apply)?",
-    JobSite.GREENHOUSE: r"https?://(?:job-boards\.|boards\.)?greenhouse\.io/[^/]+/jobs/\d+(?:[#?][^/]*)?",
-    JobSite.ASHBY: r"https?://jobs\.ashbyhq\.com/[^/]+/[a-f0-9-]+(?:/application)?",
-    JobSite.WELLFOUND: "TODO",
-    JobSite.ANGELLIST: "TODO",
-    JobSite.WORKABLE: "TODO",
-    JobSite.INDEED: "TODO",
-    JobSite.GLASSDOOR: "TODO",
-    JobSite.LINKEDIN: "TODO",
-    JobSite.CUSTOM: r"https://[^/]+/(?:company/)?(?:careers|jobs)/.*"
-}
-
-
-class JobSearchResultCleaner:
-
-    def __init__(self, job_site: JobSite):
-        self.job_site = job_site
-
-    def _prune_urls(self, urls: list[str]) -> list[str]:
-        pruned_urls = []
-        for url in urls:
-            if self.job_site == JobSite.GREENHOUSE:
-                # Handle various Greenhouse URL formats
-                match = re.search(regex[self.job_site], url)
-                if match:
-                    url = match.group()
-                    # Extract the job ID from URL or query parameter
-                    job_id = None
-                    gh_jid_match = re.search(r'gh_jid=(\d+)', url)
-                    if gh_jid_match:
-                        job_id = gh_jid_match.group(1)
-                    else:
-                        job_id_match = re.search(r'/jobs/(\d+)', url)
-                        if job_id_match:
-                            job_id = job_id_match.group(1)
-                    
-                    if job_id:
-                        # Extract company name
-                        company_match = re.search(r'(?:job-boards\.|boards\.)?greenhouse\.io/([^/]+)', url)
-                        if company_match:
-                            company = company_match.group(1)
-                            # Normalize to standard format
-                            url = f"https://boards.greenhouse.io/{company}/jobs/{job_id}"
-                            pruned_urls.append(url)
-            else:
-                # Handle other job sites as before
-                match = re.search(regex[self.job_site], url)
-                if match:
-                    pruned_urls.append(match.group())
-        return pruned_urls
-
-    def _remove_duplicates(self, urls: list[str]) -> list[str]:
-        return list(set(urls))
-
-    def _make_direct_apply_urls(self, urls: list[str]) -> list[tuple[str, str]]:
-        """Returns a list of tuples (description_url, apply_url)"""
-        if self.job_site == JobSite.LEVER:
-            urls = [re.sub(r"\?.*", "", url) for url in urls]  # clean query parameters
-            return [(url, url + "/apply") for url in urls]
-        
-        if self.job_site == JobSite.GREENHOUSE:
-            cleaned_urls = []
-            apply_urls = []
-            for url in urls:
-                # Extract company and job ID
-                company_match = re.search(r'boards\.greenhouse\.io/([^/]+)', url)
-                job_id_match = re.search(r'/jobs/(\d+)', url)
-                
-                if company_match and job_id_match:
-                    company = company_match.group(1)
-                    job_id = job_id_match.group(1)
-                    # Use the standard format for description URL
-                    desc_url = f"https://boards.greenhouse.io/{company}/jobs/{job_id}"
-                    # Create the apply URL
-                    apply_url = f"https://boards.greenhouse.io/embed/job_app?for={company}&token={job_id}"
-                    
-                    cleaned_urls.append(desc_url)
-                    apply_urls.append(apply_url)
-            
-            return list(zip(cleaned_urls, apply_urls))
-        
-        if self.job_site == JobSite.ASHBY:
-            urls = [re.sub(r"\?.*", "", url) for url in urls]
-            return [(url, url + "/application?embed=js") for url in urls]
-        
-        return [(url, url) for url in urls]  # Default to same URL for both
-
-    def clean(self, job_search_result: list) -> list[tuple[str, str]]:
-        """Clean the job search result to return tuples of (description_url, apply_url)."""
-        if not job_search_result:
-            return []
-        try:
-            return self._make_direct_apply_urls(
-                self._remove_duplicates(self._prune_urls(job_search_result))
-            )
-        except Exception as e:
-            print(f"Error cleaning job search result: {e}")
-            return []
