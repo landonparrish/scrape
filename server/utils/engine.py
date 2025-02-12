@@ -1314,3 +1314,20 @@ def handle_job_insert(supabase: any, job_urls: list[tuple[str, str]], job_site: 
                 "last_updated": datetime.now().isoformat(),
                 "job_hash": job_hash
             }
+            
+            # Insert into Supabase
+            try:
+                data = supabase.table("jobs").insert(supabase_job).execute()
+                processed_count += 1
+                logging.info(f"Successfully inserted job: {job_details['title']} at {job_details['company']}")
+            except Exception as e:
+                error_count += 1
+                logging.error(f"Error inserting job into Supabase: {str(e)}")
+                
+        except Exception as e:
+            error_count += 1
+            logging.error(f"Error processing job {desc_url}: {str(e)}")
+            continue
+            
+    logging.info(f"Processed {processed_count} jobs with {error_count} errors")
+    return processed_count, error_count
