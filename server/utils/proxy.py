@@ -32,7 +32,7 @@ class ProxyFetcher:
     def _get_random_user_agent(self) -> str:
         return random.choice(self.user_agents)
 
-    def _test_proxy(self, proxy: str, timeout: int = 10) -> bool:
+    def _test_proxy(self, proxy: str, timeout: int = 5) -> bool:
         """Test if a proxy is working by trying to connect to a test URL."""
         proxies = {
             'http': f'http://{proxy}',
@@ -41,34 +41,22 @@ class ProxyFetcher:
         
         headers = {'User-Agent': self._get_random_user_agent()}
         
-        # Try each test URL
-        for url in self.test_urls:
-            try:
-                response = requests.get(
-                    url,
-                    proxies=proxies,
-                    headers=headers,
-                    timeout=timeout,
-                    verify=False  # Don't verify SSL to be more lenient
-                )
-                if response.status_code == 200:
-                    logging.info(f"Proxy {proxy} working with {url}")
-                    return True
-            except Timeout:
-                logging.debug(f"Proxy {proxy} timed out with {url}")
-                continue
-            except ConnectionError:
-                logging.debug(f"Proxy {proxy} connection error with {url}")
-                continue
-            except RequestException as e:
-                logging.debug(f"Proxy {proxy} failed with {url}: {str(e)}")
-                continue
-            except Exception as e:
-                logging.debug(f"Proxy {proxy} unexpected error with {url}: {str(e)}")
-                continue
-        return False
+        # Just test with one reliable URL instead of multiple
+        url = 'http://example.com'  # Fastest and most reliable test URL
+        try:
+            response = requests.get(
+                url,
+                proxies=proxies,
+                headers=headers,
+                timeout=timeout,
+                verify=False
+            )
+            return response.status_code == 200
+        except Exception as e:
+            logging.debug(f"Proxy {proxy} failed: {str(e)}")
+            return False
 
-    def get_proxies(self, force_refresh: bool = False, min_proxies: int = 10) -> List[str]:
+    def get_proxies(self, force_refresh: bool = False, min_proxies: int = 5) -> List[str]:
         """Get a list of working proxies, using cache if available and not expired."""
         current_time = time.time()
         
@@ -83,19 +71,7 @@ class ProxyFetcher:
         proxies = []
 
         try:
-            # Fetch proxy list with retry logic
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    response = requests.get(url, headers=headers, timeout=15)
-                    response.raise_for_status()
-                    break
-                except (RequestException, Timeout) as e:
-                    if attempt == max_retries - 1:
-                        raise
-                    time.sleep(2 ** attempt)  # Exponential backoff
-                    continue
-
+            response = requests.get(url, headers=headers, timeout=10)
             soup = BeautifulSoup(response.content, "html.parser")
             table = soup.find("table", attrs={"class": "table table-striped table-bordered"})
             
@@ -103,73 +79,45 @@ class ProxyFetcher:
                 logging.error("Could not find proxy table on the website")
                 return self.cached_proxies if self.cached_proxies else []
 
-            # Skip header row
-            rows = table.find_all("tr")[1:]
+            rows = table.find_all("tr")[1:]  # Skip header row
             
             for row in rows:
                 cols = row.find_all("td")
-                if len(cols) >= 8:  # Ensure we have all needed columns
+                if len(cols) >= 8:
                     ip = cols[0].text.strip()
                     port = cols[1].text.strip()
-                    country_code = cols[2].text.strip()
                     anonymity = cols[4].text.strip()
                     google = cols[5].text.strip().lower() == 'yes'
-                    https = cols[6].text.strip().lower() == 'yes'
                     last_checked = cols[7].text.strip()
                     
-                    # Skip proxies that don't work with Google since we use it for search
-                    if not google:
-                        continue
-                        
-                    # Skip proxies that were checked too long ago (more than 5 mins)
+                    # More lenient filtering
                     if 'mins ago' in last_checked:
                         mins = int(''.join(filter(str.isdigit, last_checked)))
-                        if mins > 5:
+                        if mins > 15:  # Increased from 5 to 15 minutes
                             continue
-                            
-                    # Prioritize anonymous and elite proxies
-                    if anonymity.lower() not in ['anonymous', 'elite proxy']:
+                    
+                    # Accept all proxy types that work with Google
+                    if not google:
                         continue
                     
                     proxy = f"{ip}:{port}"
-                    proxies.append({
-                        'address': proxy,
-                        'country': country_code,
-                        'anonymity': anonymity,
-                        'https': https,
-                        'last_checked': mins if 'mins ago' in last_checked else 0
-                    })
+                    proxies.append(proxy)
 
-            # Sort proxies by last checked time (most recent first)
-            proxies.sort(key=lambda x: x['last_checked'])
-            
-            # Shuffle proxies within each minute group to avoid everyone using the same ones
-            grouped_proxies = {}
-            for proxy in proxies:
-                mins = proxy['last_checked']
-                if mins not in grouped_proxies:
-                    grouped_proxies[mins] = []
-                grouped_proxies[mins].append(proxy['address'])
-                
-            # Flatten and shuffle within groups
-            final_proxies = []
-            for mins in sorted(grouped_proxies.keys()):
-                group = grouped_proxies[mins]
-                random.shuffle(group)
-                final_proxies.extend(group)
+            # Shuffle all proxies
+            random.shuffle(proxies)
 
-            # Test proxies
+            # Test proxies with a limit
             working_proxies = []
-            logging.info(f"Testing {len(final_proxies)} potential proxies...")
+            max_to_test = min(20, len(proxies))  # Test at most 20 proxies
+            logging.info(f"Testing up to {max_to_test} proxies...")
             
-            for proxy in final_proxies:
+            for proxy in proxies[:max_to_test]:
                 if self._test_proxy(proxy):
                     working_proxies.append(proxy)
-                    logging.info(f"Found working proxy: {proxy} (passed connection test)")
-                
-                # If we have enough working proxies, stop testing
-                if len(working_proxies) >= min_proxies:
-                    break
+                    logging.info(f"Found working proxy: {proxy}")
+                    
+                    if len(working_proxies) >= min_proxies:
+                        break
 
             if working_proxies:
                 self.cached_proxies = working_proxies
