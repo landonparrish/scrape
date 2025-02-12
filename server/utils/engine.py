@@ -1,6 +1,6 @@
 from bs4 import BeautifulSoup
 import requests
-from utils.proxy import get_free_proxies
+from utils.proxy import get_free_proxies, get_request_config, mark_request_result
 from utils.text_processor import TextProcessor
 from enum import Enum
 import yagooglesearch
@@ -132,7 +132,7 @@ def find_jobs(
     # Then do Google search for remaining job sites
     remaining_sites = [site for site in job_sites if site not in job_urls_by_board]
     if remaining_sites:
-        proxies = [None] + get_free_proxies()
+        proxies = [None] + get_free_proxies()  # Keep this for yagooglesearch compatibility
         proxy_index = 0
         success = False
         result = []
@@ -348,45 +348,36 @@ proxy_rotator = ProxyRotator()
 
 def make_request(url: str, max_retries: int = 3) -> Optional[requests.Response]:
     """Make an HTTP request with proxy rotation and retry logic."""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'DNT': '1',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1'
-    }
-    
     for attempt in range(max_retries):
         try:
-            # Get current proxy configuration
-            proxies = proxy_rotator.get_current_proxy()
+            # Get request configuration (includes headers and proxy if needed)
+            config = get_request_config(url)
             
             # Add exponential backoff between retries
             if attempt > 0:
                 sleep_time = (2 ** attempt) + random.uniform(0, 1)
                 time.sleep(sleep_time)
             
-            response = requests.get(url, headers=headers, proxies=proxies, timeout=10)
-            status_code = response.status_code
+            response = requests.get(url, **config, timeout=10)
             
-            # Check if we should rotate proxy based on response
-            if proxy_rotator.should_rotate(status_code):
-                proxy_rotator.rotate_proxy()
-                if status_code in [429, 403]:  # Rate limit or forbidden
+            if response.status_code == 200:
+                mark_request_result(url, success=True)
+                
+                # Add a small delay between requests
+                time.sleep(random.uniform(1, 3))
+                
+                return response
+            else:
+                mark_request_result(url, success=False, status_code=response.status_code)
+                
+                # If we got rate limited or forbidden, retry with different config
+                if response.status_code in [429, 403]:
                     continue
-            
-            response.raise_for_status()
-            proxy_rotator.mark_success()
-            
-            # Add a small delay between requests
-            time.sleep(random.uniform(1, 3))
-            
-            return response
+                
+                response.raise_for_status()
             
         except Exception as e:
-            proxy_rotator.mark_failure(e)
+            mark_request_result(url, success=False)
             logging.warning(f"Request failed for {url} (attempt {attempt + 1}/{max_retries}): {str(e)}")
             
             if attempt == max_retries - 1:

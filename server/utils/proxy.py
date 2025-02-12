@@ -108,27 +108,64 @@ class ProxyFetcher:
             
             for row in rows:
                 cols = row.find_all("td")
-                if len(cols) >= 7:  # Ensure we have all needed columns
+                if len(cols) >= 8:  # Ensure we have all needed columns
                     ip = cols[0].text.strip()
                     port = cols[1].text.strip()
-                    https = cols[6].text.strip()
+                    country_code = cols[2].text.strip()
                     anonymity = cols[4].text.strip()
+                    google = cols[5].text.strip().lower() == 'yes'
+                    https = cols[6].text.strip().lower() == 'yes'
+                    last_checked = cols[7].text.strip()
                     
-                    # Accept both HTTP and HTTPS proxies, and any anonymity level
+                    # Skip proxies that don't work with Google since we use it for search
+                    if not google:
+                        continue
+                        
+                    # Skip proxies that were checked too long ago (more than 5 mins)
+                    if 'mins ago' in last_checked:
+                        mins = int(''.join(filter(str.isdigit, last_checked)))
+                        if mins > 5:
+                            continue
+                            
+                    # Prioritize anonymous and elite proxies
+                    if anonymity.lower() not in ['anonymous', 'elite proxy']:
+                        continue
+                    
                     proxy = f"{ip}:{port}"
-                    proxies.append(proxy)
+                    proxies.append({
+                        'address': proxy,
+                        'country': country_code,
+                        'anonymity': anonymity,
+                        'https': https,
+                        'last_checked': mins if 'mins ago' in last_checked else 0
+                    })
 
-            # Shuffle proxies to avoid testing the same ones first every time
-            random.shuffle(proxies)
+            # Sort proxies by last checked time (most recent first)
+            proxies.sort(key=lambda x: x['last_checked'])
+            
+            # Shuffle proxies within each minute group to avoid everyone using the same ones
+            grouped_proxies = {}
+            for proxy in proxies:
+                mins = proxy['last_checked']
+                if mins not in grouped_proxies:
+                    grouped_proxies[mins] = []
+                grouped_proxies[mins].append(proxy['address'])
+                
+            # Flatten and shuffle within groups
+            final_proxies = []
+            for mins in sorted(grouped_proxies.keys()):
+                group = grouped_proxies[mins]
+                random.shuffle(group)
+                final_proxies.extend(group)
 
             # Test proxies
             working_proxies = []
-            logging.info(f"Testing {len(proxies)} potential proxies...")
+            logging.info(f"Testing {len(final_proxies)} potential proxies...")
             
-            for proxy in proxies:
+            for proxy in final_proxies:
                 if self._test_proxy(proxy):
                     working_proxies.append(proxy)
-                    logging.info(f"Found working proxy: {proxy}")
+                    logging.info(f"Found working proxy: {proxy} (passed connection test)")
                 
                 # If we have enough working proxies, stop testing
                 if len(working_proxies) >= min_proxies:
@@ -198,6 +235,10 @@ class ProxyFetcher:
 
 # Create a global instance
 proxy_fetcher = ProxyFetcher()
+
+def get_free_proxies(force_refresh: bool = False) -> List[str]:
+    """Get a list of working proxies. Maintained for backward compatibility."""
+    return proxy_fetcher.get_proxies(force_refresh=force_refresh)
 
 def get_request_config(url: str) -> Dict[str, Union[Dict, str]]:
     """Get the appropriate request configuration (proxy and headers) for a URL."""
