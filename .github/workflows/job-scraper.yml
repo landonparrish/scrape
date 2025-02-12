@@ -19,6 +19,9 @@ jobs:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      PYTHONWARNINGS: "ignore:Unverified HTTPS request"  # For proxy handling
+      PYTHONUNBUFFERED: "1"  # For better logging
+      LOG_LEVEL: "INFO"
     
     steps:
     - uses: actions/checkout@v3
@@ -39,11 +42,18 @@ jobs:
         poetry config virtualenvs.create false
         poetry install --no-root --no-interaction --no-ansi
         
+    - name: Install additional dependencies
+      run: |
+        cd server
+        pip install pycountry pytz beautifulsoup4 requests yagooglesearch
+        
     - name: Run job scraper
       id: scraper
       run: |
         cd server
         poetry run python -c "from app import perform_task; perform_task(None)"
+      env:
+        PYTHONPATH: ${{ github.workspace }}/server
         
     - name: Report status
       if: always()
