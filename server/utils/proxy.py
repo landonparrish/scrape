@@ -2,7 +2,7 @@ import requests
 from bs4 import BeautifulSoup
 import logging
 import time
-from typing import List, Optional
+from typing import List, Optional, Dict, Union
 import random
 from requests.exceptions import RequestException, Timeout, ConnectionError
 
@@ -23,6 +23,11 @@ class ProxyFetcher:
             'https://httpbin.org/ip',  # Returns IP info
             'https://api.ipify.org?format=json'  # Another IP service
         ]
+        self.direct_connection_failures = 0
+        self.max_direct_failures = 3  # Number of failures before switching to proxies
+        self.using_proxies = False
+        self.domain_failures: Dict[str, int] = {}  # Track failures per domain
+        self.domain_cooldowns: Dict[str, float] = {}  # Track cooldown times per domain
 
     def _get_random_user_agent(self) -> str:
         return random.choice(self.user_agents)
@@ -142,10 +147,87 @@ class ProxyFetcher:
             logging.error(f"Error fetching proxies: {str(e)}")
             return self.cached_proxies if self.cached_proxies else []
 
+    def should_use_proxy(self, url: str) -> bool:
+        """Determine if we should use a proxy for this URL based on failure history."""
+        from urllib.parse import urlparse
+        domain = urlparse(url).netloc
+        
+        # Check if domain is in cooldown
+        if domain in self.domain_cooldowns:
+            cooldown_end = self.domain_cooldowns[domain]
+            if time.time() < cooldown_end:
+                return True
+            else:
+                # Cooldown expired, reset failures
+                self.domain_failures[domain] = 0
+                del self.domain_cooldowns[domain]
+        
+        return self.domain_failures.get(domain, 0) >= self.max_direct_failures
+
+    def mark_failure(self, url: str, status_code: Optional[int] = None) -> None:
+        """Mark a failure for a domain and update cooldown if needed."""
+        from urllib.parse import urlparse
+        domain = urlparse(url).netloc
+        
+        # Increment failure count
+        self.domain_failures[domain] = self.domain_failures.get(domain, 0) + 1
+        
+        # If we hit rate limit or forbidden, add longer cooldown
+        if status_code in [429, 403]:
+            cooldown_time = 300  # 5 minutes for rate limits
+            self.domain_cooldowns[domain] = time.time() + cooldown_time
+            logging.info(f"Domain {domain} in cooldown for {cooldown_time} seconds due to status {status_code}")
+        
+        # If we've failed too many times, add standard cooldown
+        elif self.domain_failures[domain] >= self.max_direct_failures:
+            cooldown_time = 60  # 1 minute for general failures
+            self.domain_cooldowns[domain] = time.time() + cooldown_time
+            logging.info(f"Domain {domain} in cooldown for {cooldown_time} seconds due to too many failures")
+
+    def mark_success(self, url: str) -> None:
+        """Mark a successful request for a domain."""
+        from urllib.parse import urlparse
+        domain = urlparse(url).netloc
+        
+        # Reset failure count on success
+        if domain in self.domain_failures:
+            del self.domain_failures[domain]
+        if domain in self.domain_cooldowns:
+            del self.domain_cooldowns[domain]
+
 
 # Create a global instance
 proxy_fetcher = ProxyFetcher()
 
-def get_free_proxies(force_refresh: bool = False) -> List[str]:
-    """Get a list of working proxies."""
-    return proxy_fetcher.get_proxies(force_refresh=force_refresh)
+def get_request_config(url: str) -> Dict[str, Union[Dict, str]]:
+    """Get the appropriate request configuration (proxy and headers) for a URL."""
+    headers = {
+        'User-Agent': proxy_fetcher._get_random_user_agent(),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1'
+    }
+    
+    config = {'headers': headers}
+    
+    if proxy_fetcher.should_use_proxy(url):
+        # Get fresh proxies if needed
+        proxies = proxy_fetcher.get_proxies()
+        if proxies:
+            proxy = random.choice(proxies)
+            config['proxies'] = {
+                'http': f'http://{proxy}',
+                'https': f'http://{proxy}'
+            }
+            logging.info(f"Using proxy {proxy} for {url}")
+    
+    return config
+
+def mark_request_result(url: str, success: bool, status_code: Optional[int] = None) -> None:
+    """Mark the result of a request to help with proxy rotation decisions."""
+    if success:
+        proxy_fetcher.mark_success(url)
+    else:
+        proxy_fetcher.mark_failure(url, status_code)
